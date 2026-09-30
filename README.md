@@ -133,7 +133,7 @@ live account (2026-09-30): responses carried `X-Ratelimit-Limit: 200`; check you
 nothing in the code depends on the number. A cross-country request returns an ~80 KB response in ~1.1 s.
 
 **External calls per request:** 1 on a cache miss, **0 on a hit**. Zero geocoding calls (locations resolve locally).
-Retry policy, used identically in code and tests: one retry, only on connection errors, timeouts and HTTP
+Retry policy, used identically in code and tests: at most `ORS_MAX_RETRIES` (default 1) retry, only on connection errors, timeouts and HTTP
 502/503/504. Never retried: 400, 401, 403, 404, 429 (and any other status such as 500).
 
 ## Data and database design
@@ -280,14 +280,23 @@ python manage.py runserver
 |---|---|---|
 | `SECRET_KEY` | required unless `DEBUG=True` | Django secret |
 | `DEBUG` | `False` | |
-| `ALLOWED_HOSTS` | `localhost,127.0.0.1` | comma separated |
+| `ALLOWED_HOSTS` | `localhost,127.0.0.1` | comma separated; must not be empty when `DEBUG=False` |
 | `DATABASE_URL` | local postgres | `postgres://user:pass@host:5432/db` |
 | `ORS_API_KEY` | none | OpenRouteService key (**required** for routing) |
 | `REDIS_URL` | empty | enables Redis cache |
 | `VEHICLE_RANGE_MILES` / `VEHICLE_MPG` | 500 / 10 | vehicle model |
-| `STATION_CORRIDOR_MILES` | 10 | how far off-route a station may be |
-| `ROUTE_CACHE_TTL` | 86400 | seconds |
-| `PLAN_THROTTLE_RATE` | `30/min` | protects the provider quota |
+| `STATION_CORRIDOR_MILES` | 10 | how far off-route a station may be (0 < x <= 100) |
+| `ROUTE_CACHE_TTL` | 86400 | seconds, integer > 0 |
+| `ORS_CONNECT_TIMEOUT` / `ORS_READ_TIMEOUT` | 3 / 15 | provider timeouts in seconds |
+| `ORS_MAX_RETRIES` | 1 | retries on transient failures only (0-3; see retry policy) |
+| `CSRF_TRUSTED_ORIGINS` | empty | comma separated; only relevant if a browser/session feature is added |
+| `PLAN_THROTTLE_RATE` | `30/min` | format `N/period` with period second, minute, hour or day; protects the provider quota |
+
+**Configuration is validated at startup**: a non-numeric, non-finite or out-of-range value (`VEHICLE_RANGE_MILES <= 0`,
+`VEHICLE_MPG <= 0`, `ROUTE_CACHE_TTL <= 0`, negative timeouts/retries, a malformed throttle rate, empty
+`ALLOWED_HOSTS` or missing `SECRET_KEY` in production) stops the app with a message naming the variable, so an invalid
+state can't reach a request. Production example: `DEBUG=False`, `ALLOWED_HOSTS=your-domain.com`,
+`CSRF_TRUSTED_ORIGINS=https://your-domain.com`.
 
 ## Tests
 

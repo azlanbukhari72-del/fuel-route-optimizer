@@ -242,3 +242,24 @@ def test_fresh_route_is_identical_to_cached_route():
     hit, cached2 = routing.get_route(NYC, LA)
     assert (cached1, cached2) == (False, True)
     assert fresh == hit  # same points, same mileage, same distance: plans cannot differ
+
+
+# --- timeouts and retry count come from settings ------------------------------------------------
+
+
+@pytest.mark.parametrize("retries,expected_calls", [(0, 1), (1, 2), (3, 4)])
+@responses.activate
+def test_retry_count_is_configurable(settings, retries, expected_calls):
+    settings.ORS_MAX_RETRIES = retries
+    responses.add(responses.POST, URL, status=503, json={})
+    with pytest.raises(RoutingProviderError):
+        routing.get_route(NYC, LA)
+    assert len(responses.calls) == expected_calls
+
+
+@responses.activate
+def test_configured_timeouts_are_passed_to_requests(settings):
+    settings.ORS_CONNECT_TIMEOUT, settings.ORS_READ_TIMEOUT = 2, 7
+    responses.add(ok())
+    routing.get_route(NYC, LA)
+    assert responses.calls[0].request.req_kwargs["timeout"] == (2, 7)

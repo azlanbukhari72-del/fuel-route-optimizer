@@ -37,7 +37,6 @@ POLYLINE_PRECISION = 5
 # ~250x smaller than the city-centroid uncertainty of the stations, and mile markers are
 # computed from the FULL path (`cum_miles`), so simplification cannot shorten the route.
 SIMPLIFY_MILES = 0.02
-TIMEOUT = (3, 15)  # connect, read seconds
 RETRY_STATUSES = {502, 503, 504}
 NO_ROUTE_CODES = {2009, 2010}  # ORS: route not found / point not routable
 
@@ -119,9 +118,11 @@ def _fetch(start, finish) -> Route:
     headers = {"Authorization": settings.ORS_API_KEY, "Content-Type": "application/json"}
 
     t0 = time.perf_counter()
-    for attempt in (1, 2):
+    attempts = 1 + settings.ORS_MAX_RETRIES
+    timeout = (settings.ORS_CONNECT_TIMEOUT, settings.ORS_READ_TIMEOUT)
+    for attempt in range(1, attempts + 1):
         try:
-            resp = requests.post(url, json=body, headers=headers, timeout=TIMEOUT)
+            resp = requests.post(url, json=body, headers=headers, timeout=timeout)
         except requests.Timeout as e:
             failure: Exception = RoutingTimeout()
             failure.__cause__ = e
@@ -140,7 +141,7 @@ def _fetch(start, finish) -> Route:
                 return _parse(resp)
             failure = RoutingProviderError(f"Routing provider unavailable ({resp.status_code}).")
             reason = f"http_{resp.status_code}"
-        if attempt == 1:
+        if attempt < attempts:
             logger.warning("ors retry reason=%s", reason)
             time.sleep(0.3 + random.random() * 0.2)
             continue
