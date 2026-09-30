@@ -1,6 +1,7 @@
 from django.db import models
 from django.db.models import Q
 
+
 class Place(models.Model):
     """Reference geodata (Census Gazetteer) for "City, ST" lookups and station geocoding."""
 
@@ -41,7 +42,9 @@ class FuelStation(models.Model):
 
     class Meta:
         constraints = [
-            models.CheckConstraint(condition=Q(price__gt=0, price__lt=20), name="station_price_sane"),
+            models.CheckConstraint(
+                condition=Q(price__gt=0, price__lt=20), name="station_price_sane"
+            ),
             models.CheckConstraint(
                 condition=Q(latitude__isnull=True, longitude__isnull=True)
                 | Q(latitude__isnull=False, longitude__isnull=False),

@@ -100,10 +100,16 @@ def load_places(path: Path) -> dict:
             )
         keep = {(p.state, p.name_key) for p in rows}
         stale = [
-            pk for pk, s, k in Place.objects.values_list("pk", "state", "name_key") if (s, k) not in keep
+            pk
+            for pk, s, k in Place.objects.values_list("pk", "state", "name_key")
+            if (s, k) not in keep
         ]
         Place.objects.filter(pk__in=stale).delete()
-    return {"places": len(rows), "new": max(0, Place.objects.count() - before), "deleted": len(stale)}
+    return {
+        "places": len(rows),
+        "new": max(0, Place.objects.count() - before),
+        "deleted": len(stale),
+    }
 
 
 def _parse_rows(path: Path, stats: ImportStats) -> dict[int, dict]:
@@ -135,11 +141,17 @@ def _parse_rows(path: Path, stats: ImportStats) -> dict[int, dict]:
             except InvalidOperation:
                 stats.invalid_skipped["bad_price"] += 1
                 continue
-            price = price.quantize(PRICE_QUANT, rounding=ROUND_HALF_UP) if price.is_finite() else price
+            price = (
+                price.quantize(PRICE_QUANT, rounding=ROUND_HALF_UP) if price.is_finite() else price
+            )
             if not price.is_finite() or not (0 < price < 20):
                 stats.invalid_skipped["bad_price"] += 1
                 continue
-            name, addr, city = _clean(row["Truckstop Name"]), _clean(row["Address"]), _clean(row["City"])
+            name, addr, city = (
+                _clean(row["Truckstop Name"]),
+                _clean(row["Address"]),
+                _clean(row["City"]),
+            )
             if not (name and city and len(state) == 2):
                 stats.invalid_skipped["missing_field"] += 1
                 continue
@@ -164,10 +176,7 @@ def import_stations(path: Path) -> ImportStats:
     stats = ImportStats()
     groups = _parse_rows(path, stats)
     stats.duplicates_merged = (
-        stats.rows_read
-        - stats.canadian_skipped
-        - sum(stats.invalid_skipped.values())
-        - len(groups)
+        stats.rows_read - stats.canadian_skipped - sum(stats.invalid_skipped.values()) - len(groups)
     )
     states = {canonical(g["state"]) for g in groups.values()}
     places = {

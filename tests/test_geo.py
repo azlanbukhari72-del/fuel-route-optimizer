@@ -119,7 +119,10 @@ def brute_force(ix, lat, lng):
     from planner.geo import _point_segment
 
     best = min(
-        (_point_segment((lat, lng), ix.points[i], ix.points[i + 1]) + (i,) for i in range(len(ix.points) - 1)),
+        (
+            _point_segment((lat, lng), ix.points[i], ix.points[i + 1]) + (i,)
+            for i in range(len(ix.points) - 1)
+        ),
         key=lambda x: x[0],
     )
     d, t, i = best
@@ -138,8 +141,10 @@ def test_grid_matches_brute_force_on_random_routes():
             pts.append((lat, lng))
         ix = RouteIndex(pts, corridor_miles=10)
         for _ in range(150):
-            p = (rng.uniform(min(x[0] for x in pts) - 0.4, max(x[0] for x in pts) + 0.4),
-                 rng.uniform(pts[0][1] - 0.4, pts[-1][1] + 0.4))
+            p = (
+                rng.uniform(min(x[0] for x in pts) - 0.4, max(x[0] for x in pts) + 0.4),
+                rng.uniform(pts[0][1] - 0.4, pts[-1][1] + 0.4),
+            )
             expected = brute_force(ix, *p)
             got = ix.locate(*p)
             if expected[1] <= 10 - 1e-6:

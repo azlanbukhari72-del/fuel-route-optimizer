@@ -13,7 +13,9 @@ class Command(BaseCommand):
 
     def add_arguments(self, parser):
         parser.add_argument("file")
-        parser.add_argument("--show-unmatched", action="store_true", help="list cities without coordinates")
+        parser.add_argument(
+            "--show-unmatched", action="store_true", help="list cities without coordinates"
+        )
 
     def handle(self, *args, file, show_unmatched, **options):
         try:

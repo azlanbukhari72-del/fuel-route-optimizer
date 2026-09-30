@@ -128,9 +128,7 @@ def plan_fuel_stops(
         fuel -= cands[target].pos - pos
         pos = cands[target].pos
         idx = target
-        stops.append(
-            Stop(cands[target], _gal(max(fuel, 0.0), mpg), Decimal(0), Decimal(0))
-        )
+        stops.append(Stop(cands[target], _gal(max(fuel, 0.0), mpg), Decimal(0), Decimal(0)))
 
     remaining = max(0.0, fuel - (route_miles - pos))
     purchased = sum((s.gallons_purchased for s in stops), Decimal(0))

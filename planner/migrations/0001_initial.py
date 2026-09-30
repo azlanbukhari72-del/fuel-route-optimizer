@@ -4,45 +4,91 @@ from django.db import migrations, models
 
 
 class Migration(migrations.Migration):
-
     initial = True
 
-    dependencies = [
-    ]
+    dependencies = []
 
     operations = [
         migrations.CreateModel(
-            name='FuelStation',
+            name="FuelStation",
             fields=[
-                ('id', models.BigAutoField(auto_created=True, primary_key=True, serialize=False, verbose_name='ID')),
-                ('opis_id', models.PositiveIntegerField(unique=True)),
-                ('name', models.CharField(max_length=200)),
-                ('address', models.CharField(max_length=200)),
-                ('city', models.CharField(max_length=100)),
-                ('state', models.CharField(max_length=2)),
-                ('rack_id', models.PositiveIntegerField()),
-                ('price', models.DecimalField(decimal_places=4, max_digits=6)),
-                ('latitude', models.DecimalField(blank=True, decimal_places=6, max_digits=9, null=True)),
-                ('longitude', models.DecimalField(blank=True, decimal_places=6, max_digits=9, null=True)),
-                ('updated_at', models.DateTimeField()),
+                (
+                    "id",
+                    models.BigAutoField(
+                        auto_created=True, primary_key=True, serialize=False, verbose_name="ID"
+                    ),
+                ),
+                ("opis_id", models.PositiveIntegerField(unique=True)),
+                ("name", models.CharField(max_length=200)),
+                ("address", models.CharField(max_length=200)),
+                ("city", models.CharField(max_length=100)),
+                ("state", models.CharField(max_length=2)),
+                ("rack_id", models.PositiveIntegerField()),
+                ("price", models.DecimalField(decimal_places=4, max_digits=6)),
+                (
+                    "latitude",
+                    models.DecimalField(blank=True, decimal_places=6, max_digits=9, null=True),
+                ),
+                (
+                    "longitude",
+                    models.DecimalField(blank=True, decimal_places=6, max_digits=9, null=True),
+                ),
+                ("updated_at", models.DateTimeField()),
             ],
             options={
-                'indexes': [models.Index(condition=models.Q(('latitude__isnull', False)), fields=['latitude', 'longitude'], name='station_lat_lng_idx')],
-                'constraints': [models.CheckConstraint(condition=models.Q(('price__gt', 0), ('price__lt', 20)), name='station_price_sane'), models.CheckConstraint(condition=models.Q(models.Q(('latitude__isnull', True), ('longitude__isnull', True)), models.Q(('latitude__isnull', False), ('longitude__isnull', False)), _connector='OR'), name='station_coords_both_or_neither')],
+                "indexes": [
+                    models.Index(
+                        condition=models.Q(("latitude__isnull", False)),
+                        fields=["latitude", "longitude"],
+                        name="station_lat_lng_idx",
+                    )
+                ],
+                "constraints": [
+                    models.CheckConstraint(
+                        condition=models.Q(("price__gt", 0), ("price__lt", 20)),
+                        name="station_price_sane",
+                    ),
+                    models.CheckConstraint(
+                        condition=models.Q(
+                            models.Q(("latitude__isnull", True), ("longitude__isnull", True)),
+                            models.Q(("latitude__isnull", False), ("longitude__isnull", False)),
+                            _connector="OR",
+                        ),
+                        name="station_coords_both_or_neither",
+                    ),
+                ],
             },
         ),
         migrations.CreateModel(
-            name='Place',
+            name="Place",
             fields=[
-                ('id', models.BigAutoField(auto_created=True, primary_key=True, serialize=False, verbose_name='ID')),
-                ('name', models.CharField(max_length=120)),
-                ('name_key', models.CharField(max_length=120)),
-                ('state', models.CharField(max_length=2)),
-                ('latitude', models.DecimalField(decimal_places=6, max_digits=9)),
-                ('longitude', models.DecimalField(decimal_places=6, max_digits=9)),
+                (
+                    "id",
+                    models.BigAutoField(
+                        auto_created=True, primary_key=True, serialize=False, verbose_name="ID"
+                    ),
+                ),
+                ("name", models.CharField(max_length=120)),
+                ("name_key", models.CharField(max_length=120)),
+                ("state", models.CharField(max_length=2)),
+                ("latitude", models.DecimalField(decimal_places=6, max_digits=9)),
+                ("longitude", models.DecimalField(decimal_places=6, max_digits=9)),
             ],
             options={
-                'constraints': [models.UniqueConstraint(fields=('state', 'name_key'), name='place_state_key_uniq'), models.CheckConstraint(condition=models.Q(('latitude__gte', 24), ('latitude__lte', 50), ('longitude__gte', -125), ('longitude__lte', -66)), name='place_in_conus')],
+                "constraints": [
+                    models.UniqueConstraint(
+                        fields=("state", "name_key"), name="place_state_key_uniq"
+                    ),
+                    models.CheckConstraint(
+                        condition=models.Q(
+                            ("latitude__gte", 24),
+                            ("latitude__lte", 50),
+                            ("longitude__gte", -125),
+                            ("longitude__lte", -66),
+                        ),
+                        name="place_in_conus",
+                    ),
+                ],
             },
         ),
     ]

@@ -15,9 +15,27 @@ HEADER = "OPIS Truckstop ID,Truckstop Name,Address,City,State,Rack ID,Retail Pri
 def places(db):
     Place.objects.bulk_create(
         [
-            Place(state="OK", name_key="big cabin", name="Big Cabin", latitude=D("36.54"), longitude=D("-95.22")),
-            Place(state="AZ", name_key="gila bend", name="Gila Bend", latitude=D("32.95"), longitude=D("-112.71")),
-            Place(state="TX", name_key="denver city", name="Denver City", latitude=D("32.96"), longitude=D("-102.83")),
+            Place(
+                state="OK",
+                name_key="big cabin",
+                name="Big Cabin",
+                latitude=D("36.54"),
+                longitude=D("-95.22"),
+            ),
+            Place(
+                state="AZ",
+                name_key="gila bend",
+                name="Gila Bend",
+                latitude=D("32.95"),
+                longitude=D("-112.71"),
+            ),
+            Place(
+                state="TX",
+                name_key="denver city",
+                name="Denver City",
+                latitude=D("32.96"),
+                longitude=D("-102.83"),
+            ),
         ]
     )
 
@@ -104,16 +122,22 @@ def test_missing_columns_and_missing_file(tmp_path, db):
 
 
 def test_db_constraints(places):
-    ok = dict(name="n", address="a", city="c", state="AZ", rack_id=1, updated_at="2026-01-01T00:00:00Z")
+    ok = dict(
+        name="n", address="a", city="c", state="AZ", rack_id=1, updated_at="2026-01-01T00:00:00Z"
+    )
     with pytest.raises(IntegrityError), transaction.atomic():
         FuelStation.objects.create(opis_id=1, price=D("0"), **ok)
     with pytest.raises(IntegrityError), transaction.atomic():
-        FuelStation.objects.create(opis_id=2, price=D("3"), latitude=D("30"), **ok)  # lat without lng
+        FuelStation.objects.create(
+            opis_id=2, price=D("3"), latitude=D("30"), **ok
+        )  # lat without lng
     FuelStation.objects.create(opis_id=3, price=D("3"), **ok)
     with pytest.raises(IntegrityError), transaction.atomic():
         FuelStation.objects.create(opis_id=3, price=D("3"), **ok)  # unique opis_id
     with pytest.raises(IntegrityError), transaction.atomic():
-        Place.objects.create(state="OK", name_key="big cabin", name="dup", latitude=D("36"), longitude=D("-95"))
+        Place.objects.create(
+            state="OK", name_key="big cabin", name="dup", latitude=D("36"), longitude=D("-95")
+        )
 
 
 def test_indexes_exist(db):
@@ -128,19 +152,27 @@ def test_indexes_exist(db):
 
 def test_load_places_idempotent_and_snapshot(tmp_path, db):
     f = tmp_path / "p.csv"
-    f.write_text("state,name_key,name,latitude,longitude\nOK,tulsa,Tulsa,36.15,-95.99\nAZ,yuma,Yuma,32.69,-114.62\n")
+    f.write_text(
+        "state,name_key,name,latitude,longitude\nOK,tulsa,Tulsa,36.15,-95.99\nAZ,yuma,Yuma,32.69,-114.62\n"
+    )
     assert load_places(f)["new"] == 2
     assert load_places(f)["new"] == 0
     f.write_text("state,name_key,name,latitude,longitude\nOK,tulsa,Tulsa,36.20,-95.99\n")
     r = load_places(f)
-    assert r["deleted"] == 1 and Place.objects.get(state="OK", name_key="tulsa").latitude == D("36.20")
+    assert r["deleted"] == 1 and Place.objects.get(state="OK", name_key="tulsa").latitude == D(
+        "36.20"
+    )
 
 
 def test_committed_places_file_has_unique_keys():
     import csv
     from pathlib import Path
 
-    rows = list(csv.DictReader(open(Path(__file__).parent.parent / "data" / "us_places.csv", encoding="utf-8")))
+    rows = list(
+        csv.DictReader(
+            open(Path(__file__).parent.parent / "data" / "us_places.csv", encoding="utf-8")
+        )
+    )
     keys = [(r["state"], r["name_key"]) for r in rows]
     assert len(rows) > 40000 and len(keys) == len(set(keys))
     assert all(r["name_key"] == normalize_place(r["name"]) for r in rows[:5000:50])
@@ -150,3 +182,13 @@ def test_lookup_keys():
     assert lookup_keys("Denver City")[:2] == ["denver city", "denver"]
     assert lookup_keys("Saint Louis")[0] == "st louis"
     assert lookup_keys("  New   York  ")[0] == "new york"
+
+
+def test_designator_stripping_and_consolidated_aliases():
+    from planner.names import alias_names, display_name
+
+    assert display_name("Indianapolis city (balance)") == "Indianapolis"
+    assert display_name("Denver City town") == "Denver City"
+    assert alias_names("Lexington-Fayette urban county") == ["Lexington"]
+    assert alias_names("Louisville/Jefferson County metro government (balance)") == ["Louisville"]
+    assert alias_names("Tulsa city") == []

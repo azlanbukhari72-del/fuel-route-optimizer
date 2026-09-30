@@ -10,9 +10,10 @@ MILES_PER_DEG_LAT = EARTH_RADIUS_MILES * math.pi / 180  # ~69.09
 
 def haversine_miles(a: tuple[float, float], b: tuple[float, float]) -> float:
     lat1, lng1, lat2, lng2 = map(math.radians, (a[0], a[1], b[0], b[1]))
-    h = math.sin((lat2 - lat1) / 2) ** 2 + math.cos(lat1) * math.cos(lat2) * math.sin(
-        (lng2 - lng1) / 2
-    ) ** 2
+    h = (
+        math.sin((lat2 - lat1) / 2) ** 2
+        + math.cos(lat1) * math.cos(lat2) * math.sin((lng2 - lng1) / 2) ** 2
+    )
     return 2 * EARTH_RADIUS_MILES * math.asin(math.sqrt(h))
 
 
@@ -58,7 +59,9 @@ def encode_polyline(points: list[tuple[float, float]], precision: int = 5) -> st
     return "".join(out)
 
 
-def decimate(points: list[tuple[float, float]], min_spacing_miles: float) -> list[tuple[float, float]]:
+def decimate(
+    points: list[tuple[float, float]], min_spacing_miles: float
+) -> list[tuple[float, float]]:
     """O(n) thinning: keep a vertex only when it is >= min_spacing from the last kept one."""
     if len(points) <= 2:
         return list(points)
@@ -70,7 +73,9 @@ def decimate(points: list[tuple[float, float]], min_spacing_miles: float) -> lis
     return kept
 
 
-def simplify(points: list[tuple[float, float]], tolerance_miles: float) -> list[tuple[float, float]]:
+def simplify(
+    points: list[tuple[float, float]], tolerance_miles: float
+) -> list[tuple[float, float]]:
     """Iterative Ramer-Douglas-Peucker. Keeps endpoints; max deviation <= tolerance."""
     n = len(points)
     if n <= 2:
@@ -153,8 +158,13 @@ class RouteIndex:
                 t = s / n
                 lat, lng = la + (lb - la) * t, ga + (gb - ga) * t
                 dlat = dlat_c + pad
-                dlng = self.corridor / (MILES_PER_DEG_LAT * max(math.cos(math.radians(lat)), 0.2)) + pad
-                for cy in range(math.floor((lat - dlat) / cell), math.floor((lat + dlat) / cell) + 1):
+                dlng = (
+                    self.corridor / (MILES_PER_DEG_LAT * max(math.cos(math.radians(lat)), 0.2))
+                    + pad
+                )
+                for cy in range(
+                    math.floor((lat - dlat) / cell), math.floor((lat + dlat) / cell) + 1
+                ):
                     for cx in range(
                         math.floor((lng - dlng) / cell), math.floor((lng + dlng) / cell) + 1
                     ):

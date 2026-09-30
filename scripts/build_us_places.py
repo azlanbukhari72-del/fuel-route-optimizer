@@ -15,7 +15,7 @@ import zipfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from planner.names import display_name, place_key  # noqa: E402
+from planner.names import alias_names, display_name, place_key  # noqa: E402
 
 BASE = "https://www2.census.gov/geo/docs/maps-data/data/gazetteer/2023_Gazetteer/"
 FILES = {"places": "2023_Gaz_place_national.zip", "cousubs": "2023_Gaz_cousubs_national.zip"}
@@ -40,6 +40,8 @@ def main() -> None:
     for d in rows("places"):
         rank = 1 if d["LSAD"] == "57" else 0  # 57 = CDP
         cands.append((rank, -float(d["ALAND_SQMI"]), d["GEOID"], d))
+        for alias in alias_names(d["NAME"]):  # lowest priority: never displaces a real place
+            cands.append((3, -float(d["ALAND_SQMI"]), d["GEOID"], {**d, "NAME": alias}))
     for d in rows("cousubs"):
         if d["NAME"].endswith("CCD") or "not defined" in d["NAME"]:
             continue

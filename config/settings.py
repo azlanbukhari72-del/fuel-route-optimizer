@@ -49,7 +49,9 @@ TEMPLATES: list = []
 
 
 def _database() -> dict:
-    url = urlparse(os.environ.get("DATABASE_URL", "postgres://postgres@localhost:5432/fuel_station"))
+    url = urlparse(
+        os.environ.get("DATABASE_URL", "postgres://postgres@localhost:5432/fuel_station")
+    )
     return {
         "ENGINE": "django.db.backends.postgresql",
         "NAME": unquote(url.path.lstrip("/")),

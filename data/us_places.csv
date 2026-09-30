@@ -4533,8 +4533,7 @@ CT,meriden,Meriden,41.536777,-72.794543
 CT,middlebury,Middlebury,41.524691,-73.123016
 CT,middlefield,Middlefield,41.514163,-72.717844
 CT,middletown,Middletown,41.548611,-72.656784
-CT,milford,Milford,41.225086,-73.06111
-CT,milford city,Milford city,41.223644,-73.064556
+CT,milford,Milford,41.223644,-73.064556
 CT,mill plain,Mill Plain,41.154692,-73.268284
 CT,monroe,Monroe,41.339236,-73.222828
 CT,montville,Montville,41.4639,-72.15557
@@ -5759,10 +5758,12 @@ GA,argyle,Argyle,31.073214,-82.648875
 GA,arlington,Arlington,31.436823,-84.729732
 GA,arnoldsville,Arnoldsville,33.914955,-83.218427
 GA,ashburn,Ashburn,31.709191,-83.652424
+GA,athens,Athens,33.949597,-83.370088
 GA,athens clarke county unified government,Athens-Clarke County unified government,33.949597,-83.370088
 GA,atlanta,Atlanta,33.762909,-84.422675
 GA,attapulgus,Attapulgus,30.74949,-84.483886
 GA,auburn,Auburn,34.015186,-83.833741
+GA,augusta,Augusta,33.365531,-82.073422
 GA,augusta richmond county consolidated government,Augusta-Richmond County consolidated government,33.365531,-82.073422
 GA,austell,Austell,33.819766,-84.643774
 GA,avalon,Avalon,34.497141,-83.198203
@@ -5885,6 +5886,7 @@ GA,crescent,Crescent,31.518659,-81.370222
 GA,crooked creek,Crooked Creek,33.265688,-83.27525
 GA,culloden,Culloden,32.864908,-84.093999
 GA,cumming,Cumming,34.206067,-84.133848
+GA,cusseta,Cusseta,32.347445,-84.788021
 GA,cusseta chattahoochee county unified government,Cusseta-Chattahoochee County unified government,32.347445,-84.788021
 GA,cuthbert,Cuthbert,31.770686,-84.793575
 GA,dacula,Dacula,33.981967,-83.90108
@@ -5934,6 +5936,7 @@ GA,east newnan,East Newnan,33.345796,-84.776725
 GA,east point,East Point,33.67112,-84.473429
 GA,eastman,Eastman,32.197561,-83.170658
 GA,eatonton,Eatonton,33.325821,-83.388862
+GA,echols county,Echols County,30.714008,-82.897376
 GA,echols county consolidated government,Echols County consolidated government,30.714008,-82.897376
 GA,edge hill,Edge Hill,33.153421,-82.624989
 GA,edison,Edison,31.560812,-84.737402
@@ -6377,6 +6380,7 @@ GA,waverly hall,Waverly Hall,32.68289,-84.728333
 GA,waycross,Waycross,31.211006,-82.357658
 GA,waynesboro,Waynesboro,33.091279,-82.01429
 GA,waynesville,Waynesville,31.227222,-81.783591
+GA,webster county,Webster County,32.046691,-84.553828
 GA,webster county unified government,Webster County unified government,32.046691,-84.553828
 GA,wenona,Wenona,31.910941,-83.751066
 GA,west brow,West Brow,34.914816,-85.418583
@@ -11175,7 +11179,7 @@ IN,idaville,Idaville,40.758765,-86.650563
 IN,independence,Independence,40.337949,-87.171645
 IN,indian creek,Indian Creek,38.865306,-86.602024
 IN,indian village,Indian Village,41.714271,-86.23224
-IN,indianapolis city,Indianapolis city,39.776664,-86.145935
+IN,indianapolis,Indianapolis,39.776664,-86.145935
 IN,ingalls,Ingalls,39.95895,-85.805753
 IN,ireland,Ireland,38.414399,-86.998844
 IN,iroquois,Iroquois,40.870911,-87.331677
@@ -12392,6 +12396,7 @@ KS,grantville,Grantville,39.080594,-95.561169
 KS,grasshopper,Grasshopper,39.601943,-95.480098
 KS,great bend,Great Bend,38.359792,-98.799514
 KS,greeley,Greeley,38.367374,-95.126349
+KS,greeley county,Greeley County,38.480413,-101.806024
 KS,greeley county unified government,Greeley County unified government,38.480413,-101.806024
 KS,green,Green,39.430124,-96.999896
 KS,green garden,Green Garden,38.557866,-98.321424
@@ -13546,6 +13551,7 @@ KY,ledbetter,Ledbetter,37.052414,-88.496814
 KY,leitchfield,Leitchfield,37.48624,-86.284687
 KY,lewisburg,Lewisburg,36.98723,-86.950188
 KY,lewisport,Lewisport,37.930668,-86.902816
+KY,lexington,Lexington,38.040678,-84.458272
 KY,lexington fayette,Lexington-Fayette,38.040678,-84.458272
 KY,liberty,Liberty,37.317988,-84.930487
 KY,lincolnshire,Lincolnshire,38.223784,-85.62156
@@ -22218,6 +22224,7 @@ MT,brooks,Brooks,47.205297,-109.421139
 MT,browning,Browning,48.556344,-113.015095
 MT,bull lake,Bull Lake,48.229506,-115.852598
 MT,busby,Busby,45.525636,-106.977522
+MT,butte,Butte,45.896232,-112.660071
 MT,butte silver bow,Butte-Silver Bow,45.896232,-112.660071
 MT,bynum,Bynum,47.968123,-112.316476
 MT,camas,Camas,47.617922,-114.655991
@@ -38442,6 +38449,7 @@ TN,louisville,Louisville,35.82269,-84.052652
 TN,luray,Luray,35.601704,-88.570246
 TN,luttrell,Luttrell,36.209619,-83.748494
 TN,lyles,Lyles,35.919496,-87.344979
+TN,lynchburg moore county,"Lynchburg, Moore County",35.288888,-86.358684
 TN,lynchburg moore county metropolitan government,"Lynchburg, Moore County metropolitan government",35.288888,-86.358684
 TN,lynnville,Lynnville,35.378104,-87.005437
 TN,madisonville,Madisonville,35.523204,-84.362972
@@ -38488,6 +38496,7 @@ TN,mt juliet,Mount Juliet,36.1992,-86.509489
 TN,mt pleasant,Mount Pleasant,35.54815,-87.186928
 TN,munford,Munford,35.442869,-89.815922
 TN,murfreesboro,Murfreesboro,35.853915,-86.421224
+TN,nashville,Nashville,36.1718,-86.785002
 TN,nashville davidson metropolitan government,Nashville-Davidson metropolitan government,36.1718,-86.785002
 TN,new deal,New Deal,36.513864,-86.562867
 TN,new hope,New Hope,34.999428,-85.668442
