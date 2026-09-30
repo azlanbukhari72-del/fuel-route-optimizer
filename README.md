@@ -1,346 +1,1046 @@
 # Fuel Route Planner
 
-`POST /api/v1/routes/plan/` takes a start and finish in the contiguous US, makes **one**
-OpenRouteService call for the driving route, picks the cost-optimal fuel stops from a local
-PostgreSQL table of truck-stop prices, and returns the route geometry, each stop, and the money
-spent on fuel. Django 6.1 + Django REST Framework 3.18, PostgreSQL, no PostGIS, no Celery.
+A Django + Django REST Framework service that plans cost-efficient fuel stops for long-distance driving routes across the contiguous United States.
 
+The API accepts a start and finish location, obtains a driving route from OpenRouteService, finds nearby fuel stations from a local PostgreSQL dataset, and computes the minimum-cost fuel purchase plan.
+
+## Highlights
+
+* Django 6.1 + Django REST Framework 3.18
+* PostgreSQL with no PostGIS dependency
+* OpenRouteService for driving directions
+* Redis route caching (in-process LocMem cache when `REDIS_URL` is unset)
+* Deterministic greedy fuel optimization
+* City/state and coordinate-based locations
+* Bounding-box station candidate filtering
+* Pure-Python route corridor projection
+* Decimal-based fuel pricing
+* Snapshot-safe CSV imports
+* Structured API errors
+* Request throttling
+* Automated tests for algorithm, geometry, routing, imports, and API behavior
+* Docker Compose configuration for local deployment
+
+The system intentionally avoids unnecessary infrastructure such as Celery, PostGIS, route persistence, or background processing.
+
+---
+
+## Architecture
+
+```text
+Client
+  |
+  v
+DRF API
+  |
+  +--> Resolve locations
+  |       |
+  |       +--> PostgreSQL Place lookup
+  |
+  +--> Obtain route
+  |       |
+  |       +--> Redis / LocMem cache
+  |       |
+  |       +--> OpenRouteService on cache miss
+  |
+  +--> Find candidate fuel stations
+  |       |
+  |       +--> PostgreSQL bounding-box query
+  |       +--> Route corridor/grid filtering
+  |
+  +--> Optimize fuel purchases
+  |       |
+  |       +--> Pure Python greedy algorithm
+  |
+  +--> Load selected station metadata
+  |
+  v
+JSON response
 ```
-client -> DRF view -> resolve locations (1 query, no API call)
-                   -> route (cache | 1 ORS call) -> candidate stations (1 bbox query + corridor projection)
-                   -> optimizer (pure Python) -> selected-stop metadata (1 query) -> JSON
-```
 
-## Assumptions (read these first)
+A normal city/state request requires at most three database queries:
 
-The brief gives a 500-mile range and 10 MPG and nothing else. These are the interpretations I made:
+1. Resolve start and finish locations.
+2. Retrieve candidate fuel stations.
+3. Retrieve metadata for selected stops.
 
-1. **Tank = 50 gallons** (500 mi ÷ 10 MPG). Inferred from the brief, not invented.
-2. **The vehicle starts with a full 50-gallon tank; that fuel is already paid for and is *not*
-   in `total_fuel_cost`.** No price is invented for it. Only fuel bought at stations is charged.
-   A trip of 500 miles or less therefore returns `stops: []` and `total_fuel_cost: "0.00"`.
-3. Four quantities are never conflated: **fuel consumed** (`distance / mpg`), **fuel purchased**,
-   **fuel remaining** and **purchase cost**. Invariant: `start + purchased - consumed = remaining >= 0`.
-   - 300 mi: consumed 30 gal, purchased 0, cost $0, remaining 20 gal.
-   - 750 mi: consumed 75 gal, start 50, purchased 25 gal, only those 25 gal are charged.
-4. **The only objective is total purchase cost.** The plan does not promise the fewest stops or
-   the least detour. Where several plans cost the same, fixed rules pick one deterministically
-   (below); those are tie-breakers, not a secondary goal. Because there is no per-stop fee in the
-   model, the optimum often contains several small top-ups (e.g. "buy 1.1 gal here because the
-   next station is cheaper"). That is correct for the stated objective; a stop fee would change it.
-5. The vehicle may arrive with exactly zero fuel (no reserve). Lower `VEHICLE_RANGE_MILES` to emulate one.
-6. Every price in the file is treated as the price of the vehicle's fuel (there is no fuel-type column).
-7. **Duplicate price rows per station are a data interpretation, not a fact.** 597 station IDs
-   appear with several different prices and the file has no timestamp or explanation. I read them
-   as alternative price points for the same station and keep the **lowest**. If they are really
-   different products or tiers, this understates cost. The rule lives in one function
-   (`importer.choose_price`).
-8. **Stations are located at their city centroid** (see Data). Station positions therefore carry
-   an error of a few miles, so a station counts as "on the route" when within **10 miles**
-   (`STATION_CORRIDOR_MILES`), and the response reports `distance_from_route_miles` per stop.
-   Detour distance to reach a station is not charged.
+Coordinate-based requests skip the location lookup.
+
+---
 
 ## API
 
-Locations are either `"City, ST"` (resolved locally, no external call) or `{"lat": .., "lng": ..}`.
-Free-text street addresses are **not** supported (no geocoding call is made); they return 422.
+### Plan a Route
+
+```http
+POST /api/v1/routes/plan/
+```
+
+Example:
+
+```json
+{
+  "start": "New York, NY",
+  "finish": {
+    "lat": 34.0522,
+    "lng": -118.2437
+  }
+}
+```
+
+Locations can be supplied as either:
+
+```json
+"New York, NY"
+```
+
+or:
+
+```json
+{
+  "lat": 40.7128,
+  "lng": -74.0060
+}
+```
+
+Free-text street addresses are intentionally not supported.
+
+No geocoding API is called for location resolution.
+
+#### Example Request
 
 ```bash
 curl -X POST http://localhost:8000/api/v1/routes/plan/ \
   -H "Content-Type: application/json" \
-  -d '{"start": "New York, NY", "finish": {"lat": 34.0522, "lng": -118.2437}}'
+  -d '{
+    "start": "New York, NY",
+    "finish": {
+      "lat": 34.0522,
+      "lng": -118.2437
+    }
+  }'
 ```
 
-Response 200 (**abbreviated**: geometry coordinates and stops are truncated with `...`, so the
-single stop shown does not add up to the totals; a real cross-country response lists every stop):
+---
+
+### Response
+
+A successful response contains:
+
+* route start and finish
+* route distance and duration
+* GeoJSON route geometry
+* vehicle configuration
+* fuel consumed
+* fuel purchased
+* fuel remaining
+* total purchase cost
+* selected fuel stops
+* planning metadata
+
+Example (**abbreviated**: `geometry.coordinates` and `stops` are truncated, so the single stop shown does not add up to the totals; a real cross-country response lists every stop):
 
 ```json
 {
   "route": {
-    "start":  {"label": "New York, NY", "lat": 40.662712, "lng": -73.938677},
-    "finish": {"label": "34.0522,-118.2437", "lat": 34.0522, "lng": -118.2437},
+    "start": {
+      "label": "New York, NY",
+      "lat": 40.662712,
+      "lng": -73.938677
+    },
+    "finish": {
+      "label": "34.0522,-118.2437",
+      "lat": 34.0522,
+      "lng": -118.2437
+    },
     "distance_miles": 2800.2,
     "duration_minutes": 2712.0,
-    "geometry": {"type": "LineString", "coordinates": [[-73.93872, 40.6631], "..."]}
+    "geometry": {
+      "type": "LineString",
+      "coordinates": [
+        [-73.93872, 40.6631],
+        "..."
+      ]
+    }
   },
   "fuel": {
-    "vehicle": {"range_miles": 500.0, "mpg": 10.0, "tank_gallons": "50.000"},
+    "vehicle": {
+      "range_miles": 500.0,
+      "mpg": 10.0,
+      "tank_gallons": "50.000"
+    },
     "start_gallons": "50.000",
     "gallons_consumed": "280.018",
     "gallons_purchased": "230.018",
     "gallons_remaining_at_destination": "0.000",
-    "total_fuel_cost": "695.11",
+    "total_fuel_cost": "695.20",
     "stops": [
       {
         "sequence": 1,
-        "station": {"opis_id": 72445, "name": "SHEETZ #639", "address": "I-80 Exit 223",
-                    "city": "Youngstown", "state": "OH", "lat": 41.099095, "lng": -80.645902},
-        "mile_marker": 398.4,
+        "station": {
+          "opis_id": 72445,
+          "name": "SHEETZ #639",
+          "address": "I-80 Exit 223",
+          "city": "Youngstown",
+          "state": "OH",
+          "lat": 41.099095,
+          "lng": -80.645902
+        },
+        "mile_marker": 400.8,
         "distance_from_route_miles": 3.8,
         "price_per_gallon": "3.0590",
-        "gallons_on_arrival": "10.158",
-        "gallons_purchased": "6.457",
-        "gallons_after_purchase": "16.615",
-        "cost": "19.75"
+        "gallons_on_arrival": "9.917",
+        "gallons_purchased": "6.613",
+        "gallons_after_purchase": "16.530",
+        "cost": "20.23"
       }
+      // ... 14 more stops omitted in this example
     ]
   },
-  "meta": {"algorithm": "greedy-v1", "candidate_stations": 442, "route_cached": false,
-           "corridor_miles": 10.0, "assumptions": ["..."]}
+  "meta": {
+    "algorithm": "greedy-v1",
+    "candidate_stations": 442,
+    "route_cached": false,
+    "corridor_miles": 10.0,
+    "assumptions": ["..."]
+  }
 }
 ```
 
-Coordinate conventions: everywhere internally and in JSON points are `lat`/`lng`; **GeoJSON
-`[lng, lat]` appears only inside `route.geometry.coordinates`**, and the ORS client converts at its boundary.
-Money and gallons are strings (no client float drift). Money is rounded to cents half-up **per stop line**, and
-`total_fuel_cost` is the sum of those rounded lines so the receipt adds up. Rounding happens only in the
-serializer/pipeline output; the optimizer works with unrounded values.
+Each stop reports the station, its `mile_marker` along the route, `distance_from_route_miles` (how far the station's coordinates are from the route), the `price_per_gallon`, the fuel on arrival, the gallons purchased, the fuel after purchase, and the line `cost`. `total_fuel_cost` is the sum of the rounded line costs, so the receipt adds up.
 
-Errors always use `{"error": {"code", "message", "details"}}`:
+Money and fuel quantities are returned as strings to avoid client-side floating-point rounding issues.
 
-| Situation | HTTP | code |
-|---|---|---|
-| Malformed JSON, missing/blank/invalid field, bad lat/lng, start == finish | 400 | `validation_error` |
-| Unknown city / not `City, ST` | 422 | `location_not_found` |
-| Outside the contiguous-US rectangle | 422 | `location_outside_service_area` |
-| Provider says no route / point not routable | 422 | `route_not_found` |
-| A gap longer than the range with no station (details: `stuck_at_mile`, `max_reachable_mile`, `gap_miles`) | 422 | `no_feasible_fuel_plan` |
-| Provider rate limited (429) | 503 + `Retry-After` | `routing_rate_limited` |
-| Provider 5xx / malformed body / bad credentials / not configured | 502 | `routing_provider_error` |
-| Provider timeout | 504 | `routing_timeout` |
-| Database down | 503 | `database_unavailable` |
-| Our own throttle (`PLAN_THROTTLE_RATE`, default `30/min`) | 429 | `throttled` |
-| Unexpected | 500 | `internal_error` (no stack trace in the body) |
+GeoJSON coordinates use the standard `[longitude, latitude]` order. Internal application coordinates use `lat` / `lng`.
 
-400 means the request is malformed; 422 means it is understood but cannot be satisfied; 404 is only for unknown URLs.
-`GET /api/v1/health/` checks the database.
+---
 
-The location check for coordinates is a **rectangle** (lat 24.4-49.6, lng -125.0 to -66.9), not a border
-polygon. It rejects Europe or Mexico City but accepts some points in southern Canada/Mexico/the ocean
-inside the rectangle; those fail later as `route_not_found` or find no stations.
+## Fuel Model
 
-## Routing provider: OpenRouteService
+The brief specifies:
 
-| Option | Verdict |
-|---|---|
-| **OpenRouteService** | **Chosen.** Free key, published free-tier quotas, driving-car profile, one request returns polyline + distance + duration, distance in miles via `units=mi`. |
-| OSRM public demo | Keyless, but "no excessive use, no SLA, can be blocked"; not something to depend on. |
-| Google / Mapbox / HERE | Free tiers need billing setup; too much friction for a take-home. |
-| GraphHopper / Valhalla public | Smaller quota / best-effort. |
+* 500-mile vehicle range
+* 10 MPG
 
-**Requires a free API key** (https://openrouteservice.org/): set `ORS_API_KEY`. Observed on the
-live account (2026-09-30): responses carried `X-Ratelimit-Limit: 200`; check your own dashboard,
-nothing in the code depends on the number. A cross-country request returns an ~80 KB response in ~1.1 s.
+This implies a 50-gallon tank:
 
-**External calls per request:** 1 on a cache miss, **0 on a hit**. Zero geocoding calls (locations resolve locally).
-Retry policy, used identically in code and tests: at most `ORS_MAX_RETRIES` (default 1) retry, only on connection errors, timeouts and HTTP
-502/503/504. Never retried: 400, 401, 403, 404, 429 (and any other status such as 500).
+```text
+500 miles / 10 MPG = 50 gallons
+```
 
-## Data and database design
+The vehicle starts with a full tank.
 
-`data/fuel-prices.csv` has 8,151 rows, no coordinates, no timestamps. Findings: 620 Canadian rows
-(skipped), 26 exact duplicates, 597 stations with several prices, 227 with name variants, addresses are
-highway exits (`I-44, EXIT 283 & US-69`) that street geocoders can't place.
+Starting fuel is treated as already paid for and is therefore excluded from `total_fuel_cost`.
 
-Two models, each justified:
+Only fuel purchased during the trip contributes to the reported cost.
 
-- **`FuelStation`**: one row per OPIS id (natural key, `unique`). `price` is `numeric(6,4)` (never float),
-  nullable lat/lng with a `CHECK` that both or neither are set, `CHECK 0 < price < 20`, a partial B-tree index on
-  `(latitude, longitude)`. `updated_at` is the *local record update timestamp* (when the importer last changed the
-  row), not a price date. A price-history table was rejected: the file has no timestamps, so history is unrepresentable.
-- **`Place`**: reference geodata (US Census Gazetteer 2023: places + county subdivisions, public domain) used for
-  `"City, ST"` lookup and for geocoding stations at import time. `unique(state, name_key)`.
+The following invariant is maintained:
 
-No Route/RouteRequest tables: routes are transient (cached), not domain data.
+```text
+start fuel + purchased fuel - consumed fuel = remaining fuel
+```
 
-**Geocoding approach.** Stations are placed at the centroid of their city from the Gazetteer: no API calls, ever.
-The raw Gazetteer does *not* have unique names (e.g. a city and a CDP both called "Cottonwood, AZ"), so
-`scripts/build_us_places.py` builds `data/us_places.csv` with a deterministic rule per `(state, name_key)`:
-incorporated place over CDP over county subdivision, then largest land area, then lowest GEOID. **This is an
-intentional approximation** (land area is a proxy for "the place you meant"), so an ambiguous name can resolve to
-the wrong same-named place. Consolidated governments get short aliases (`Lexington-Fayette` -> `Lexington`).
-Measured on this file: **6,410 of 6,626 US stations (96.7%) get coordinates**; the rest are stored with null
-coordinates and never become candidates. (List them with `import_fuel_data --show-unmatched`.)
-A geocoding fallback for those ~3% was considered and **not built**.
+#### Examples
 
-**Import semantics.** The CSV is a *complete snapshot*: `import_fuel_data` upserts by OPIS id and **deletes
-stations absent from the file**, all in one transaction. Because that is destructive, a suspicious file is refused
-**before** the transaction starts: no usable rows (always refused, even with `--force`), fewer than `--min-rows`
-(default 1000 stations / 10000 places), or fewer than half the rows already stored. `--force` overrides the size
-checks only. `load_places` has the same guards. Re-importing the same file is a no-op. The canonical name
-is the most frequent variant (ties -> lexicographically smallest), so results don't depend on row order.
+| Distance | Fuel Consumed | Fuel Purchased | Fuel Remaining |     Fuel Cost |
+| -------: | ------------: | -------------: | -------------: | ------------: |
+|   300 mi |        30 gal |          0 gal |         20 gal |         $0.00 |
+|   500 mi |        50 gal |          0 gal |          0 gal |         $0.00 |
+|   750 mi |        75 gal |         25 gal |          0 gal | Purchase cost |
 
-## Algorithm
+No reserve fuel is assumed.
 
-Model: route length `D`; stations at positions `s_i` (miles along the route) with prices `p_i`; tank `C = 50` gal
-(range `R = 500` mi). The start is **not** a station: it is an initial state (full free tank) and nothing is ever
-bought there. Minimize the money spent at stations.
+---
 
-Terms: *current station*, *current fuel* (miles of range), *reachable stations* (after the current one, within one
-tank; from the start, within the free fuel), *first cheaper station* (nearest by route position with a strictly
-lower price than the current station), *cheapest reachable station* (lowest price, ties -> farthest along the
-route, then lowest id). Loop:
+## Fuel Optimization
 
-1. Destination reachable on the current fuel: stop.
-2. At the start: drive to the cheapest reachable station (no purchase).
-3. At a station: if a first cheaper station is reachable, buy just enough to reach it. Otherwise, if the
-   destination is within a tank, buy just enough to finish. Otherwise fill up and go to the cheapest reachable
-   station. No reachable station and destination out of range: infeasible (422).
+The planner minimizes **total fuel purchase cost**.
 
-Why it is optimal (exchange argument): fuel bought at a station is only ever used up to the next cheaper station
-(anything used past it could have been bought there for less); so either the next cheaper station is within a tank
-(buy the minimum to get there; more is dominated, less is infeasible) or none is (every unit up to capacity is at
-least as cheap as anything reachable, so fill up). A single tank size and a constant per-station price give this
-greedy-choice property. **If a per-stop fee or detour cost were added, greedy would no longer be optimal** and it
-would need a DP over (station, fuel).
+It does not optimize:
 
-Verification: hand-built cases (range boundary 500 / 500.001, reachability, clusters, equal prices, order
-independence), invariants, and a cross-check against an independently written brute-force DP on 400 random
-**discretized** instances (integer miles and cents), plus a property test that adding a station never raises the
-optimal cost or makes a feasible trip infeasible. The DP is a regression check on many shapes, not a proof about the
-continuous problem; the exchange argument is the justification.
+* number of stops
+* driving distance
+* station detour distance
+* stop duration
 
-Complexity: sort `O(n log n)` plus `O(k*w)` for `k` stops and `w` stations per 500-mile window; the measured
-optimizer time is under a millisecond.
+There is no stop fee or detour cost in the current model.
 
-All optimizer arithmetic is unrounded (float miles for feasibility with a 1e-6 tolerance, `Decimal` for money);
-rounding happens only when building the response.
+### Greedy Strategy
+
+At each reachable station:
+
+1. If the destination can be reached with the current fuel, finish.
+2. Find the first reachable station with a strictly lower price.
+3. If one exists, purchase only enough fuel to reach it.
+4. Otherwise, if the destination is reachable after refueling, purchase only enough to finish.
+5. Otherwise, fill the tank and continue toward the cheapest reachable station.
+6. If neither the destination nor another station is reachable, the route is infeasible.
+
+The starting location is not treated as a fuel station and no artificial fuel price is assigned to it.
+
+### Why Greedy Works
+
+Fuel purchased at a station should not be carried beyond a reachable cheaper station because the same fuel could be purchased there at a lower price.
+
+Therefore:
+
+* when a cheaper station is reachable, minimize the amount purchased now;
+* when no cheaper station is reachable, the current station is at least as cheap as every reachable alternative, so filling the tank is optimal.
+
+This exchange argument establishes the greedy-choice property for the current fuel model.
+
+If the model later adds stop fees, detour costs, or other state-dependent costs, this algorithm would need to be replaced by a more general optimization approach.
+
+The implementation is independently regression-tested against a discrete dynamic-programming oracle on randomized instances.
+
+---
+
+## Routing
+
+OpenRouteService is used for driving directions.
+
+```text
+OpenRouteService
+    |
+    +-- driving-car profile
+    +-- route geometry
+    +-- distance
+    +-- duration
+```
+
+A route is requested only when it is not already cached.
+
+### Provider Calls
+
+```text
+Cache hit  -> 0 provider calls
+Cache miss -> 1 provider call
+```
+
+Location resolution does not use an external geocoder.
+
+### Retry Policy
+
+Only transient failures are retried:
+
+* connection errors
+* timeouts
+* HTTP 502
+* HTTP 503
+* HTTP 504
+
+The default configuration allows one retry.
+
+The following are not retried:
+
+* HTTP 400
+* HTTP 401
+* HTTP 403
+* HTTP 404
+* HTTP 429
+* other non-transient responses
+
+Provider failures are translated into stable application-level API errors.
+
+---
+
+## Routing Provider
+
+OpenRouteService was chosen because it provides, in a single request, a driving route with geometry, distance and duration, and it offers a free API key with published quotas. **A free key is required to run the API**: create one at https://openrouteservice.org/ and set `ORS_API_KEY`. The application does not depend on any specific quota number.
+
+| Option | Decision |
+| --- | --- |
+| OpenRouteService | **Chosen.** Free key, driving profile, route geometry + distance + duration in one request, distances in miles. |
+| OSRM public demo | No key, but no service guarantee and usage restrictions; not suitable as a dependency. |
+| Google / Mapbox / HERE | Free tiers need billing setup; too much friction for this project. |
+| GraphHopper / Valhalla public servers | Smaller quota or best-effort availability. |
+
+A cold request is dominated by this external call (about 1.1 s in local measurements).
+
+---
+
+## Route Caching
+
+Only the routing result is cached.
+
+The fuel plan is intentionally recalculated because station data can change when the fuel dataset is imported.
+
+The cache contains:
+
+* route distance
+* route duration
+* simplified route geometry
+* cumulative route mileage
+
+Cache keys include a routing configuration version so changes to the routing request format cannot silently reuse incompatible cached data.
+
+Default TTL:
+
+```text
+24 hours
+```
+
+Redis is used when `REDIS_URL` is configured.
+
+Without Redis, Django's `LocMemCache` is used for local development and tests.
+
+Invalid cached values are validated, discarded, and replaced with a fresh provider response.
+
+---
+
+## Station Data
+
+The supplied dataset contains fuel station prices but does not contain usable latitude/longitude coordinates.
+
+The importer enriches stations using US Census Gazetteer place data.
+
+Stations are positioned at the centroid of their associated city.
+
+This is an intentional approximation.
+
+The raw Gazetteer can contain several places with the same normalized name, so `scripts/build_us_places.py` applies deterministic selection rules per `(state, name_key)`:
+
+1. Incorporated place
+2. Census-designated place
+3. County subdivision
+4. Largest land area
+5. Lowest GEOID as the final tie-breaker
+
+Land area is only a proxy for "the place the user meant", so an ambiguous name can resolve to a same-named place other than the intended one.
+
+Approximately 97% of US stations in the supplied dataset receive coordinates. Stations that cannot be resolved remain in the database but are excluded from route candidate selection.
+
+### Data Assumptions
+
+The source file contains multiple price rows for some station IDs but does not provide price timestamps or a fuel-type field.
+
+The importer therefore:
+
+* uses OPIS ID as the station natural key;
+* keeps the lowest price when multiple prices exist for one station;
+* chooses a deterministic canonical station name;
+* skips Canadian rows;
+* preserves stations without coordinates;
+* never invents price history.
+
+These are dataset interpretations rather than claims about the underlying source data.
+
+---
+
+## Database Design
+
+The application intentionally uses only two domain models.
+
+### `Place`
+
+Stores normalized US place data used to resolve:
+
+```text
+City, ST
+```
+
+Fields include:
+
+* name
+* normalized name
+* state
+* latitude
+* longitude
+
+Places are uniquely identified by:
+
+```text
+(state, name_key)
+```
+
+### `FuelStation`
+
+Stores:
+
+* OPIS ID
+* station name
+* address
+* city
+* state
+* rack ID
+* price
+* latitude
+* longitude
+* import/update timestamp
+
+The database uses PostgreSQL numeric types for prices.
+
+A database constraint ensures latitude and longitude are either both present or both absent.
+
+A partial latitude/longitude index supports candidate station queries.
+
+No route or fuel-plan records are persisted because plans are transient.
+
+---
+
+## Fuel Data Import
+
+The supplied CSV is treated as a complete snapshot.
+
+```bash
+python manage.py import_fuel_data data/fuel-prices.csv
+```
+
+The importer:
+
+1. validates the input;
+2. rejects suspiciously small snapshots;
+3. parses and normalizes rows;
+4. resolves station coordinates;
+5. upserts stations by OPIS ID;
+6. removes stations absent from the snapshot;
+7. commits the entire operation atomically.
+
+Suspicious snapshots are rejected before destructive changes begin.
+
+`--force` can override size-based safety checks when intentionally importing a smaller dataset.
+
+Example:
+
+```bash
+python manage.py import_fuel_data data/fuel-prices.csv --show-unmatched
+```
+
+Re-importing the same dataset is idempotent.
+
+Canonical station names are selected deterministically so results do not depend on CSV row order.
+
+---
+
+## Geographic Candidate Selection
+
+The application does not require PostGIS.
+
+Candidate stations are first filtered using a PostgreSQL bounding-box query.
+
+The remaining stations are matched against the route using a pure-Python spatial grid.
+
+Every route segment is registered in the grid cells crossed by its corridor rather than only indexing segment endpoints.
+
+For each candidate station, the planner calculates:
+
+* nearest distance to the route;
+* projected position along the route;
+* route mile marker.
+
+This avoids comparing every station against every route segment.
+
+The implementation is tested against brute-force geometric calculations, including long route segments and corridor boundary cases.
+
+---
+
+## Route Geometry
+
+The routing provider may return a large number of geometry points.
+
+Two representations are used.
+
+### Planning Geometry
+
+A high-fidelity Douglas-Peucker simplification is used for route projection and station matching.
+
+Tolerance:
+
+```text
+0.02 miles
+```
+
+This keeps geometric error significantly below the uncertainty introduced by city-centroid station coordinates.
+
+Cumulative mileage is calculated from the full provider route before simplification so station mile markers are not distorted by geometry decimation.
+
+### Response Geometry
+
+A coarser:
+
+```text
+0.25-mile
+```
+
+simplification is used for the client response to keep JSON responses compact.
+
+---
+
+## API Errors
+
+All application errors use a consistent envelope:
+
+```json
+{
+  "error": {
+    "code": "route_not_found",
+    "message": "No driving route found between the locations.",
+    "details": {}
+  }
+}
+```
+
+| Condition             | HTTP Status |
+| --------------------- | ----------: |
+| Invalid request       |         400 |
+| Unknown location      |         422 |
+| Outside service area  |         422 |
+| No route              |         422 |
+| No feasible fuel plan |         422 |
+| Provider rate limit   |         503 |
+| Provider error        |         502 |
+| Provider timeout      |         504 |
+| Database unavailable  |         503 |
+| Application throttle  |         429 |
+| Unexpected error      |         500 |
+
+A `GET /api/v1/health/` endpoint performs an actual database connectivity check.
+
+---
+
+## Service Area
+
+The service accepts coordinates within a contiguous-US bounding rectangle:
+
+```text
+Latitude:  24.4 to 49.6
+Longitude: -125.0 to -66.9
+```
+
+This is a rectangle rather than a political boundary polygon.
+
+As a result, some points in southern Canada, Mexico, or surrounding water can pass the initial coordinate check and fail later during routing or station selection.
+
+Alaska and Hawaii are outside the current service area.
+
+---
 
 ## Performance
 
-Measured locally (Windows laptop, PostgreSQL 18, `runserver`), real ORS, real data:
+Measured locally using PostgreSQL 18, real routing responses, and the supplied station dataset:
 
-| Route | Miles | Stops | Cold (ORS call) | Warm (route cached) |
-|---|---|---|---|---|
-| Chicago -> Indianapolis | 184 | 0 | ~1.1 s | 8 ms |
-| Boise -> Nashville | 1,929 | 8 | ~1.2 s | 39 ms |
-| Los Angeles -> New York | 2,809 | 15 | ~1.3 s | 73 ms |
-| Seattle -> Miami | 3,329 | 17 | ~1.4 s | 81 ms |
+| Route                  | Distance | Stops |   Cold | Cached |
+| ---------------------- | -------: | ----: | -----: | -----: |
+| Chicago → Indianapolis |   184 mi |     0 | ~1.1 s |  ~8 ms |
+| Boise → Nashville      | 1,929 mi |     8 | ~1.2 s | ~39 ms |
+| Los Angeles → New York | 2,809 mi |    15 | ~1.3 s | ~73 ms |
+| Seattle → Miami        | 3,329 mi |    17 | ~1.4 s | ~81 ms |
 
-Cold latency is dominated by the routing provider (~1.1 s). Warm time is candidate selection (up to ~70 ms on
-cross-country routes) and optimization is ~0 ms. Per-stage timings are logged on every request (`route_plan ok ...`).
+Cold latency is dominated by the external routing provider.
 
-- **Queries: exactly 3** on the `"City, ST"` path: 1 `Place` query for both inputs, 1 bounding-box candidate
-  query, 1 metadata query for the selected stops. Coordinates skip the Place query; a trip needing no stops skips
-  the metadata query. Tests pin these counts.
-- **Candidate selection:** SQL bounding box (`values_list`, no model instances), then a grid index over the route.
-  Every route segment is registered in every grid cell its 10-mile corridor touches (sampled along the whole
-  segment, not just at vertices), so a station beside the middle of a long straight segment is found. Lookup is a
-  dict access plus a few exact point-to-segment tests. Tested against a brute-force nearest-segment on random routes.
-- **`EXPLAIN ANALYZE`** on the real table: a cross-country bounding box (4,697 of 6,626 rows) does a seq scan in
-  ~1.8 ms, which is the right plan at this size; a narrow box uses `station_lat_lng_idx` (Bitmap Index Scan,
-  0.17 ms). The index is there for correctness at larger scale, not claimed as a win here.
-- **Route geometry.** The optimizer and station matching use the provider's route at full fidelity within a stated,
-  measured bound, not a thinned copy: the 21k-vertex provider polyline is simplified with Douglas-Peucker to a
-  **0.02-mile (~32 m) tolerance** (no dropped vertex is farther than that from the kept path), which is ~250x smaller
-  than the city-centroid uncertainty of the stations. **Mile markers are computed from the full path's cumulative
-  distance** at each kept vertex, so simplification cannot shorten the route (an earlier version thinned vertices by
-  0.5 mi and scaled the shorter length, which drifted mile markers by up to ~5 mi and off-route distances by 0.27 mi).
-  Measured on the real cross-country route against the full-resolution polyline: off-route distance differs by
-  <= 0.05 mi for every station; for stations near the road, mile markers differ by <= 0.15 mi. For a station several
-  miles off a sharp bend, "the nearest point on the road" is ambiguous between near-equidistant stretches, so its
-  mile marker can differ by more than that from the full-resolution answer; its distance is still within tolerance,
-  and this is inherent to projecting a point, not to simplification. A separate, coarser simplification (0.25 mi) is
-  used only for the geometry returned to the client.
-- Response: ~21 KB (geometry simplified with Ramer-Douglas-Peucker to a 0.25-mile tolerance, ~700 points
-  coast to coast) instead of the provider's payload.
-- **PostGIS was considered and rejected**: it adds GDAL/GEOS installation pain and a different DB image for 6.6k
-  points. Upgrade path if the dataset grows 100x: GiST index + `ST_DWithin` + `ST_LineLocatePoint`.
+The optimizer itself runs in under a millisecond on the tested dataset.
 
-## Caching
+### Database Query Budget
 
-Only the **provider route** is cached (encoded simplified polyline + full-path mileage + distance + duration), never
-the fuel plan
-(it depends on station data that changes on import, and recomputing takes milliseconds).
-Key: `route:{ROUTING_CACHE_VERSION}:sha1(rounded start|finish)`; the version string encodes provider, profile, request
-options and payload format (`ors-driving-car-mi-rdp0.02-v2`), so changing any of them can't read stale entries.
-Coordinates are rounded to 4 decimals (~11 m). TTL 24 h (`ROUTE_CACHE_TTL`). A failing cache backend degrades to the
-provider. **Cached values are validated on read** (keys, types, decodable polyline, mileage list of the right length and
-monotonic); a malformed or stale entry is logged (no credentials), deleted, treated as a miss, and replaced by the
-fresh provider result. A fresh route is served through the same encode/decode round trip as a cached one, so a cache hit
-returns exactly the same plan as the request that filled it. Backend: Django's built-in `RedisCache` when `REDIS_URL` is set, otherwise in-process `LocMemCache`.
-Redis matters only with multiple workers (LocMem is per-process, so each worker would spend provider quota separately)
-and it survives deploys; nothing else uses it. `meta.route_cached` shows hits.
+The planner maintains a bounded database query pattern.
 
-## Running locally
+#### City/State Request
+
+```text
+1. Location lookup
+2. Candidate station query
+3. Selected station metadata query
+```
+
+#### Coordinate Request
+
+```text
+1. Candidate station query
+2. Selected station metadata query
+```
+
+A trip requiring no fuel stops does not perform the metadata query.
+
+Query counts are covered by automated tests.
+
+---
+
+## Testing
+
+167 tests across six files:
+
+| Area | Tests | Covers |
+| --- | ---: | --- |
+| Optimizer | 22 | range boundaries, free starting tank, equal prices, clustered stations, unreachable gaps, fuel/cost invariants, randomized cross-check against an independent DP, adding a station never hurts |
+| Routing client | 46 | success, retry table (what is and is not retried), timeouts, rate limits, malformed responses, credentials never logged, cache hits, corrupt cache entries, configurable timeouts/retries |
+| API | 36 | request validation, response shape, every error code, query counts, provider call counts, cache behavior, throttling, timing with real route geometry |
+| Settings | 29 | invalid configuration fails at startup, naming the variable |
+| Importer | 18 | duplicates, Canadian rows, snapshot safety, idempotency, deterministic names, constraints, refusal of empty files |
+| Geometry | 16 | distances, polyline decoding, simplification bounds, corridor boundaries, long segments, grid index vs brute force |
+
+Run the test suite with (requires a reachable PostgreSQL; see Local Development):
 
 ```bash
-python -m venv .venv && source .venv/bin/activate      # Windows: .venv\Scripts\activate
+pytest
+```
+
+Run linting and formatting checks with:
+
+```bash
+ruff check .
+ruff format --check .
+```
+
+The test suite does not depend on live OpenRouteService requests. External routing behavior is mocked and a real provider response is available as a fixture.
+
+---
+
+## Configuration
+
+Create a local environment file:
+
+```bash
+cp .env.example .env
+```
+
+Required:
+
+```env
+SECRET_KEY=
+ORS_API_KEY=
+DATABASE_URL=
+```
+
+Optional:
+
+```env
+DEBUG=False
+ALLOWED_HOSTS=localhost,127.0.0.1
+CSRF_TRUSTED_ORIGINS=
+REDIS_URL=
+
+VEHICLE_RANGE_MILES=500
+VEHICLE_MPG=10
+STATION_CORRIDOR_MILES=10
+
+ROUTE_CACHE_TTL=86400
+
+ORS_CONNECT_TIMEOUT=3
+ORS_READ_TIMEOUT=15
+ORS_MAX_RETRIES=1
+
+PLAN_THROTTLE_RATE=30/min
+```
+
+### Configuration Reference
+
+| Variable                 | Default                | Description                         |
+| ------------------------ | ---------------------- | ----------------------------------- |
+| `SECRET_KEY`             | Required in production | Django secret key                   |
+| `DEBUG`                  | `False`                | Django debug mode                   |
+| `ALLOWED_HOSTS`          | `localhost,127.0.0.1`  | Allowed hostnames (must not be empty when `DEBUG=False`) |
+| `CSRF_TRUSTED_ORIGINS`   | Empty                  | Trusted origins; only relevant if a browser/session feature is added |
+| `DATABASE_URL`           | Local PostgreSQL       | PostgreSQL connection URL           |
+| `ORS_API_KEY`            | Required for routing   | OpenRouteService API key            |
+| `REDIS_URL`              | Empty                  | Enables Redis-backed caching        |
+| `VEHICLE_RANGE_MILES`    | `500`                  | Vehicle range                       |
+| `VEHICLE_MPG`            | `10`                   | Vehicle fuel economy                |
+| `STATION_CORRIDOR_MILES` | `10`                   | Maximum station distance from route |
+| `ROUTE_CACHE_TTL`        | `86400`                | Route cache lifetime in seconds     |
+| `ORS_CONNECT_TIMEOUT`    | `3`                    | ORS connection timeout              |
+| `ORS_READ_TIMEOUT`       | `15`                   | ORS read timeout                    |
+| `ORS_MAX_RETRIES`        | `1`                    | Maximum transient retries           |
+| `PLAN_THROTTLE_RATE`     | `30/min`               | API request throttle                |
+
+Configuration is validated during application startup.
+
+Invalid or non-finite numeric values, invalid throttle rates, missing production secrets, and invalid host configuration cause startup to fail rather than allowing an invalid runtime configuration.
+
+Never commit `.env` or API credentials.
+
+---
+
+## Local Development
+
+### Requirements
+
+* Python 3.12+
+* PostgreSQL
+* Optional Redis
+
+### Setup
+
+Create a virtual environment:
+
+```bash
+python -m venv .venv
+```
+
+Windows:
+
+```powershell
+.venv\Scripts\activate
+```
+
+Linux/macOS:
+
+```bash
+source .venv/bin/activate
+```
+
+Install dependencies:
+
+```bash
 pip install -r requirements/dev.txt
-cp .env.example .env                                     # set DATABASE_URL, SECRET_KEY, ORS_API_KEY
+```
+
+Create and configure `.env`:
+
+```bash
+cp .env.example .env
+```
+
+Create the PostgreSQL database named in `DATABASE_URL`:
+
+```bash
+createdb fuel_station
+```
+
+(or run `CREATE DATABASE fuel_station;` in `psql` / pgAdmin). The database user also needs permission to create databases, because `pytest` creates a temporary `test_...` database.
+
+Run migrations:
+
+```bash
 python manage.py migrate
-python manage.py load_places                             # data/us_places.csv (45k places)
-python manage.py import_fuel_data data/fuel-prices.csv   # add --show-unmatched to list ungeocoded cities
+```
+
+Load US places:
+
+```bash
+python manage.py load_places
+```
+
+Import fuel data:
+
+```bash
+python manage.py import_fuel_data data/fuel-prices.csv
+```
+
+Start the development server:
+
+```bash
 python manage.py runserver
 ```
 
-`data/us_places.csv` is committed; `python scripts/build_us_places.py` regenerates it from the Census files.
+The API is then available at:
 
-| Variable | Default | Meaning |
-|---|---|---|
-| `SECRET_KEY` | required unless `DEBUG=True` | Django secret |
-| `DEBUG` | `False` | |
-| `ALLOWED_HOSTS` | `localhost,127.0.0.1` | comma separated; must not be empty when `DEBUG=False` |
-| `DATABASE_URL` | local postgres | `postgres://user:pass@host:5432/db` |
-| `ORS_API_KEY` | none | OpenRouteService key (**required** for routing) |
-| `REDIS_URL` | empty | enables Redis cache |
-| `VEHICLE_RANGE_MILES` / `VEHICLE_MPG` | 500 / 10 | vehicle model |
-| `STATION_CORRIDOR_MILES` | 10 | how far off-route a station may be (0 < x <= 100) |
-| `ROUTE_CACHE_TTL` | 86400 | seconds, integer > 0 |
-| `ORS_CONNECT_TIMEOUT` / `ORS_READ_TIMEOUT` | 3 / 15 | provider timeouts in seconds |
-| `ORS_MAX_RETRIES` | 1 | retries on transient failures only (0-3; see retry policy) |
-| `CSRF_TRUSTED_ORIGINS` | empty | comma separated; only relevant if a browser/session feature is added |
-| `PLAN_THROTTLE_RATE` | `30/min` | format `N/period` with period second, minute, hour or day; protects the provider quota |
-
-**Configuration is validated at startup**: a non-numeric, non-finite or out-of-range value (`VEHICLE_RANGE_MILES <= 0`,
-`VEHICLE_MPG <= 0`, `ROUTE_CACHE_TTL <= 0`, negative timeouts/retries, a malformed throttle rate, empty
-`ALLOWED_HOSTS` or missing `SECRET_KEY` in production) stops the app with a message naming the variable, so an invalid
-state can't reach a request. Production example: `DEBUG=False`, `ALLOWED_HOSTS=your-domain.com`,
-`CSRF_TRUSTED_ORIGINS=https://your-domain.com`.
-
-## Tests
-
-```bash
-pytest          # needs a PostgreSQL the DATABASE_URL user can create a test database on; no network
-ruff check . && ruff format --check .
+```text
+http://localhost:8000/api/v1/routes/plan/
 ```
 
-130+ tests: optimizer rules and DP cross-check (also mutation-checked: deliberately breaking the optimizer makes the
-suite fail), geometry/grid index and simplification bounds, routing client (retry table, cache incl. corrupt entries,
-malformed responses, key never logged), importer (snapshot semantics, refusal of empty/tiny files, idempotency, constraints), API (shape, errors, query
-counts, provider call count, cache hit, throttle) and a timing guard using the real ORS geometry with 4,000 synthetic
-stations. The ORS network is always mocked (`responses`); a real ORS response is committed as a fixture.
+---
 
 ## Docker
 
+The repository includes Docker Compose configuration for:
+
+* Django application
+* PostgreSQL
+* Redis
+
+`docker-compose.yml` requires `SECRET_KEY` (it refuses to start without it). `ORS_API_KEY` is passed through to the app.
+
+Start the stack:
+
 ```bash
-export SECRET_KEY=change-me ORS_API_KEY=your-key
+export SECRET_KEY=change-me
+export ORS_API_KEY=your-openrouteservice-key
 docker compose up --build
+```
+
+PowerShell:
+
+```powershell
+$env:SECRET_KEY = "change-me"
+$env:ORS_API_KEY = "your-openrouteservice-key"
+docker compose up --build
+```
+
+Load reference data:
+
+```bash
 docker compose exec web python manage.py load_places
+```
+
+Import fuel data:
+
+```bash
 docker compose exec web python manage.py import_fuel_data data/fuel-prices.csv
 ```
 
-`web` + PostgreSQL + Redis (Redis is justified by the multi-worker cache above). **These Docker files were written but
-not run** (Docker is not installed on the development machine); the same code was verified against a local PostgreSQL 18.
+Redis is used for shared route caching when multiple application workers are running.
+
+**These Docker files have not been run.** Docker was not available on the development machine, so the application was verified against a local PostgreSQL 18 (and the in-process cache) instead. The Redis cache path is likewise untested against a live Redis server.
+
+---
 
 ## Postman
 
-Import `postman/fuel-route-planner.postman_collection.json` (base URL variable defaults to `http://localhost:8000`).
-It covers a cross-country plan (run it twice to see `route_cached: true`), a short trip ($0, no stops), coordinate
-input, unknown city, same start/finish, a missing field and an out-of-area point, each with assertions.
+A Postman collection is included:
 
-## Known limitations
+```text
+postman/fuel-route-planner.postman_collection.json
+```
 
-- Station coordinates are city centroids (a few miles of error; ~3% of stations have none), ambiguous city names
-  use an area-based heuristic, and duplicate price rows use "lowest" (assumptions 7-8).
-- Cost-only objective: many small top-ups, no stop fee, no reserve, no detour cost, no live prices.
-- Free-text addresses are not supported; only `City, ST` and coordinates.
-- The US check is a rectangle, not a polygon; Alaska/Hawaii/Canada stations aren't in scope.
-- Cold requests depend on the routing provider's latency and quota.
+It covers:
 
-## With more time
+* cross-country route planning
+* cached requests
+* short trips
+* coordinate input
+* unknown locations
+* validation errors
+* same start/finish
+* service-area validation
 
-Border polygon and address geocoding (fallback for unmatched cities); snapping stations to actual highway exits
-(OSM) instead of city centroids; price freshness/timestamps and history; DP variant with stop fees and reserve fuel;
-self-hosted Valhalla/OSRM; PostGIS if the dataset grows; structured metrics/tracing; deploy on Cloud Run + Cloud SQL +
-Memorystore.
+For the cache scenario, run the same request twice and inspect:
+
+```json
+"route_cached": true
+```
+
+on the second request.
+
+---
+
+## Design Decisions
+
+### Why PostgreSQL?
+
+The application needs relational storage for:
+
+* fuel stations
+* place reference data
+* constraints
+* indexed candidate queries
+
+PostgreSQL provides these capabilities without requiring additional spatial infrastructure for the current dataset size.
+
+### Why No PostGIS?
+
+The supplied dataset contains only thousands of stations.
+
+Bounding-box filtering followed by the application-level route grid provides sufficient performance for the current workload without introducing a PostGIS/GDAL/GEOS dependency.
+
+PostGIS remains a natural upgrade if the station dataset grows substantially.
+
+### Why No Celery?
+
+Route planning is synchronous and the expensive external operation is a single routing request.
+
+Background jobs would add operational and architectural complexity without being required by the current workload.
+
+### Why No Route Persistence?
+
+Routes and fuel plans are transient outputs.
+
+Only the routing provider response is cached because it is the expensive external operation.
+
+### Why No Price History?
+
+The source dataset contains no timestamps.
+
+Persisting historical price records would imply information that the source does not provide.
+
+---
+
+## Known Limitations
+
+The current implementation intentionally has the following limitations:
+
+* station coordinates use city centroids;
+* approximately 3% of stations cannot be geolocated from the supplied data;
+* ambiguous city names use deterministic place-selection rules;
+* duplicate station prices use the lowest observed value;
+* free-text street addresses are unsupported;
+* the service-area check uses a bounding rectangle rather than a political boundary polygon;
+* station detour distance is not included in fuel cost;
+* prices are imported data rather than live prices;
+* the optimization objective does not include stop fees or detour costs, so the optimal plan can contain many small top-ups (for example 15 stops on a 2,800-mile trip);
+* the starting tank is assumed to be full;
+* no reserve fuel is required.
+
+These limitations are explicit parts of the current problem model rather than hidden behavior.
+
+---
+
+## Future Extensions
+
+If the requirements expand, possible next steps include:
+
+* US boundary polygon validation
+* external address geocoding
+* highway-aware station coordinates
+* timestamped fuel-price history
+* live price ingestion
+* reserve-fuel constraints
+* stop and detour costs
+* dynamic programming for expanded optimization constraints
+* PostGIS for substantially larger station datasets
+* structured metrics and distributed tracing
+* self-hosted routing infrastructure
+
+These are intentionally outside the current implementation scope.
+
+---
+
+## Project Structure
+
+```text
+fuel-route-optimizer/
+│
+├── config/                 # Django project configuration (settings, urls, wsgi)
+├── planner/                # Route planning application
+│   ├── models.py           # Place and FuelStation models
+│   ├── names.py            # Place-name normalization (pure)
+│   ├── locations.py        # "City, ST" / coordinate resolution
+│   ├── routing.py          # OpenRouteService integration and route caching
+│   ├── stations.py         # Candidate station selection along a route
+│   ├── geo.py              # Geographic calculations and route grid index
+│   ├── optimizer.py        # Fuel optimization algorithm (pure)
+│   ├── pipeline.py         # End-to-end planning workflow
+│   ├── serializers.py      # Request validation and response contract
+│   ├── errors.py           # Application errors and error envelope
+│   ├── importer.py         # Fuel and place data import logic
+│   ├── views.py            # DRF endpoints
+│   └── management/         # load_places, import_fuel_data commands
+│
+├── data/
+│   ├── fuel-prices.csv
+│   └── us_places.csv
+│
+├── scripts/
+│   └── build_us_places.py
+│
+├── tests/                  # Automated test suite
+├── postman/                # Postman collection
+│
+├── Dockerfile
+├── docker-compose.yml
+├── manage.py
+├── pyproject.toml
+├── requirements/
+├── .env.example
+└── README.md
+```
+
+---
+
+## Security
+
+* API credentials are loaded from environment variables.
+* `.env` is excluded from version control.
+* API keys are never included in API responses or logs.
+* Provider credentials are not included in cache payloads.
+* Invalid configuration fails during startup.
+* Application throttling protects the routing-provider quota.
+* Unexpected API errors do not expose stack traces to clients.
+
+For deployment, HTTPS and the standard Django production security settings should be enabled at the infrastructure/application level.
+
+---
+
+## License
+
+This project is provided for assessment purposes.
+
