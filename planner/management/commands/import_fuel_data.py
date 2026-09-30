@@ -14,12 +14,18 @@ class Command(BaseCommand):
     def add_arguments(self, parser):
         parser.add_argument("file")
         parser.add_argument(
+            "--min-rows", type=int, default=1000, help="refuse files with fewer usable stations"
+        )
+        parser.add_argument(
+            "--force", action="store_true", help="skip the size checks (empty files stay refused)"
+        )
+        parser.add_argument(
             "--show-unmatched", action="store_true", help="list cities without coordinates"
         )
 
-    def handle(self, *args, file, show_unmatched, **options):
+    def handle(self, *args, file, show_unmatched, min_rows, force, **options):
         try:
-            stats = import_stations(Path(file))
+            stats = import_stations(Path(file), min_rows=min_rows, force=force)
         except ImportFileError as e:
             raise CommandError(str(e)) from e
         self.stdout.write(stats.summary())

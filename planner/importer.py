@@ -32,6 +32,32 @@ class ImportFileError(Exception):
     pass
 
 
+class ImportRefused(ImportFileError):
+    """The snapshot looks wrong (empty / far smaller than what is stored); nothing was changed."""
+
+
+# A snapshot import deletes rows absent from the file, so refuse suspicious files BEFORE the
+# destructive transaction. Empty is always refused; --force only overrides the size checks.
+MIN_KEEP_RATIO = 0.5  # incoming rows must be >= this fraction of the rows already stored
+
+
+def _guard_snapshot(kind: str, incoming: int, existing: int, min_rows: int, force: bool) -> None:
+    if incoming == 0:
+        raise ImportRefused(f"refusing to import: no usable {kind} rows in the file")
+    if force:
+        return
+    if incoming < min_rows:
+        raise ImportRefused(
+            f"refusing to import: {incoming} {kind} rows is below the minimum of {min_rows} "
+            "(use --force if this is really the full dataset)"
+        )
+    if existing and incoming < existing * MIN_KEEP_RATIO:
+        raise ImportRefused(
+            f"refusing to import: {incoming} {kind} rows would replace {existing} stored rows "
+            f"(< {MIN_KEEP_RATIO:.0%}); use --force if intended"
+        )
+
+
 @dataclass
 class ImportStats:
     rows_read: int = 0
@@ -77,18 +103,22 @@ def canonical(values: list[str]) -> str:
     return min(counts, key=lambda v: (-counts[v], v.casefold(), v))
 
 
-def load_places(path: Path) -> dict:
-    with Path(path).open(newline="", encoding="utf-8") as f:
-        rows = [
-            Place(
-                state=r["state"],
-                name_key=r["name_key"],
-                name=r["name"][:120],
-                latitude=Decimal(r["latitude"]),
-                longitude=Decimal(r["longitude"]),
-            )
-            for r in csv.DictReader(f)
-        ]
+def load_places(path: Path, min_rows: int = 1, force: bool = False) -> dict:
+    try:
+        with Path(path).open(newline="", encoding="utf-8") as f:
+            rows = [
+                Place(
+                    state=r["state"],
+                    name_key=r["name_key"],
+                    name=r["name"][:120],
+                    latitude=Decimal(r["latitude"]),
+                    longitude=Decimal(r["longitude"]),
+                )
+                for r in csv.DictReader(f)
+            ]
+    except (OSError, KeyError, InvalidOperation) as e:
+        raise ImportFileError(f"cannot read places file {path}: {e!r}") from e
+    _guard_snapshot("place", len(rows), Place.objects.count(), min_rows, force)
     with transaction.atomic():
         before = Place.objects.count()
         for i in range(0, len(rows), 5000):
@@ -170,9 +200,12 @@ def _parse_rows(path: Path, stats: ImportStats) -> dict[int, dict]:
     return groups
 
 
-def import_stations(path: Path) -> ImportStats:
+def import_stations(path: Path, min_rows: int = 1, force: bool = False) -> ImportStats:
     """Import the fuel CSV as a COMPLETE SNAPSHOT: upsert by opis_id, delete stations absent
-    from the file, all in one transaction. Re-importing the same file is a no-op."""
+    from the file, all in one transaction. Re-importing the same file is a no-op.
+
+    Suspicious snapshots (no usable rows, fewer than ``min_rows``, or under half the stored
+    rows) are refused before anything is modified unless ``force`` is set (never for empty)."""
     stats = ImportStats()
     groups = _parse_rows(path, stats)
     stats.duplicates_merged = (
@@ -210,6 +243,7 @@ def import_stations(path: Path) -> ImportStats:
         }
 
     compared = ("name", "address", "city", "state", "rack_id", "price", "latitude", "longitude")
+    _guard_snapshot("station", len(desired), FuelStation.objects.count(), min_rows, force)
     with transaction.atomic():
         existing = {s.opis_id: s for s in FuelStation.objects.all()}
         to_create, to_update = [], []

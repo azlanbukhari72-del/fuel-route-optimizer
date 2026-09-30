@@ -15,7 +15,7 @@ from planner.errors import (
     RoutingRateLimited,
     RoutingTimeout,
 )
-from planner.geo import MILES_PER_DEG_LAT, decimate, decode_polyline
+from planner.geo import MILES_PER_DEG_LAT, decode_polyline, simplify
 from planner.models import FuelStation, Place
 from planner.routing import Route
 
@@ -293,7 +293,7 @@ def test_second_identical_request_is_cached_end_to_end(client, world, settings):
 
     settings.ORS_API_KEY = "k"
     fixture = json.loads((Path(__file__).parent / "fixtures" / "ors_sample.json").read_text())
-    pts = decimate(decode_polyline(fixture["routes"][0]["geometry"]), 0.5)
+    pts = simplify(decode_polyline(fixture["routes"][0]["geometry"]), 0.02)
     step = len(pts) // 14
     for n, i in enumerate(range(step, len(pts) - 1, step)):  # a station roughly every 200 miles
         add_station(n + 1, 0, "3.2", lat=pts[i][0])
@@ -338,7 +338,7 @@ def test_real_geometry_with_many_stations_is_fast_and_bounded(client, db, monkey
     import time
 
     data = json.loads((Path(__file__).parent / "fixtures" / "ors_sample.json").read_text())
-    pts = decimate(decode_polyline(data["routes"][0]["geometry"]), 0.5)
+    pts = simplify(decode_polyline(data["routes"][0]["geometry"]), 0.02)
     rng = random.Random(5)
     stations = []
     for i in range(4000):

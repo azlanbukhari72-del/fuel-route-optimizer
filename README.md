@@ -164,7 +164,10 @@ coordinates and never become candidates. (List them with `import_fuel_data --sho
 A geocoding fallback for those ~3% was considered and **not built**.
 
 **Import semantics.** The CSV is a *complete snapshot*: `import_fuel_data` upserts by OPIS id and **deletes
-stations absent from the file**, all in one transaction. Re-importing the same file is a no-op. The canonical name
+stations absent from the file**, all in one transaction. Because that is destructive, a suspicious file is refused
+**before** the transaction starts: no usable rows (always refused, even with `--force`), fewer than `--min-rows`
+(default 1000 stations / 10000 places), or fewer than half the rows already stored. `--force` overrides the size
+checks only. `load_places` has the same guards. Re-importing the same file is a no-op. The canonical name
 is the most frequent variant (ties -> lexicographically smallest), so results don't depend on row order.
 
 ## Algorithm
@@ -209,12 +212,12 @@ Measured locally (Windows laptop, PostgreSQL 18, `runserver`), real ORS, real da
 
 | Route | Miles | Stops | Cold (ORS call) | Warm (route cached) |
 |---|---|---|---|---|
-| Chicago -> Indianapolis | 184 | 0 | ~1.05 s | 11 ms |
-| Boise -> Nashville | 1,929 | 8 | ~1.17 s | 56 ms |
-| Los Angeles -> New York | 2,809 | 15 | ~1.25 s | 105 ms |
-| Seattle -> Miami | 3,329 | 17 | ~1.37 s | 97 ms |
+| Chicago -> Indianapolis | 184 | 0 | ~1.1 s | 8 ms |
+| Boise -> Nashville | 1,929 | 8 | ~1.2 s | 39 ms |
+| Los Angeles -> New York | 2,809 | 15 | ~1.3 s | 73 ms |
+| Seattle -> Miami | 3,329 | 17 | ~1.4 s | 81 ms |
 
-Cold latency is dominated by the routing provider (~1.1 s). Warm time is candidate selection (50-80 ms on
+Cold latency is dominated by the routing provider (~1.1 s). Warm time is candidate selection (up to ~70 ms on
 cross-country routes) and optimization is ~0 ms. Per-stage timings are logged on every request (`route_plan ok ...`).
 
 - **Queries: exactly 3** on the `"City, ST"` path: 1 `Place` query for both inputs, 1 bounding-box candidate
@@ -227,6 +230,18 @@ cross-country routes) and optimization is ~0 ms. Per-stage timings are logged on
 - **`EXPLAIN ANALYZE`** on the real table: a cross-country bounding box (4,697 of 6,626 rows) does a seq scan in
   ~1.8 ms, which is the right plan at this size; a narrow box uses `station_lat_lng_idx` (Bitmap Index Scan,
   0.17 ms). The index is there for correctness at larger scale, not claimed as a win here.
+- **Route geometry.** The optimizer and station matching use the provider's route at full fidelity within a stated,
+  measured bound, not a thinned copy: the 21k-vertex provider polyline is simplified with Douglas-Peucker to a
+  **0.02-mile (~32 m) tolerance** (no dropped vertex is farther than that from the kept path), which is ~250x smaller
+  than the city-centroid uncertainty of the stations. **Mile markers are computed from the full path's cumulative
+  distance** at each kept vertex, so simplification cannot shorten the route (an earlier version thinned vertices by
+  0.5 mi and scaled the shorter length, which drifted mile markers by up to ~5 mi and off-route distances by 0.27 mi).
+  Measured on the real cross-country route against the full-resolution polyline: off-route distance differs by
+  <= 0.05 mi for every station; for stations near the road, mile markers differ by <= 0.15 mi. For a station several
+  miles off a sharp bend, "the nearest point on the road" is ambiguous between near-equidistant stretches, so its
+  mile marker can differ by more than that from the full-resolution answer; its distance is still within tolerance,
+  and this is inherent to projecting a point, not to simplification. A separate, coarser simplification (0.25 mi) is
+  used only for the geometry returned to the client.
 - Response: ~21 KB (geometry simplified with Ramer-Douglas-Peucker to a 0.25-mile tolerance, ~700 points
   coast to coast) instead of the provider's payload.
 - **PostGIS was considered and rejected**: it adds GDAL/GEOS installation pain and a different DB image for 6.6k
@@ -234,12 +249,16 @@ cross-country routes) and optimization is ~0 ms. Per-stage timings are logged on
 
 ## Caching
 
-Only the **provider route** is cached (encoded, decimated polyline + distance + duration), never the fuel plan
+Only the **provider route** is cached (encoded simplified polyline + full-path mileage + distance + duration), never
+the fuel plan
 (it depends on station data that changes on import, and recomputing takes milliseconds).
 Key: `route:{ROUTING_CACHE_VERSION}:sha1(rounded start|finish)`; the version string encodes provider, profile, request
-options and payload format (`ors-driving-car-mi-decim0.5-v1`), so changing any of them can't read stale entries.
+options and payload format (`ors-driving-car-mi-rdp0.02-v2`), so changing any of them can't read stale entries.
 Coordinates are rounded to 4 decimals (~11 m). TTL 24 h (`ROUTE_CACHE_TTL`). A failing cache backend degrades to the
-provider. Backend: Django's built-in `RedisCache` when `REDIS_URL` is set, otherwise in-process `LocMemCache`.
+provider. **Cached values are validated on read** (keys, types, decodable polyline, mileage list of the right length and
+monotonic); a malformed or stale entry is logged (no credentials), deleted, treated as a miss, and replaced by the
+fresh provider result. A fresh route is served through the same encode/decode round trip as a cached one, so a cache hit
+returns exactly the same plan as the request that filled it. Backend: Django's built-in `RedisCache` when `REDIS_URL` is set, otherwise in-process `LocMemCache`.
 Redis matters only with multiple workers (LocMem is per-process, so each worker would spend provider quota separately)
 and it survives deploys; nothing else uses it. `meta.route_cached` shows hits.
 
@@ -277,8 +296,9 @@ pytest          # needs a PostgreSQL the DATABASE_URL user can create a test dat
 ruff check . && ruff format --check .
 ```
 
-110+ tests: optimizer rules and DP cross-check, geometry/grid index, routing client (retry table, cache, malformed
-responses, key never logged), importer (snapshot semantics, idempotency, constraints), API (shape, errors, query
+130+ tests: optimizer rules and DP cross-check (also mutation-checked: deliberately breaking the optimizer makes the
+suite fail), geometry/grid index and simplification bounds, routing client (retry table, cache incl. corrupt entries,
+malformed responses, key never logged), importer (snapshot semantics, refusal of empty/tiny files, idempotency, constraints), API (shape, errors, query
 counts, provider call count, cache hit, throttle) and a timing guard using the real ORS geometry with 4,000 synthetic
 stations. The ORS network is always mocked (`responses`); a real ORS response is committed as a fixture.
 

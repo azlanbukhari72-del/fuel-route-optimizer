@@ -8,11 +8,12 @@ import pytest
 from planner.geo import (
     MILES_PER_DEG_LAT,
     RouteIndex,
-    decimate,
+    cumulative_miles,
     decode_polyline,
     encode_polyline,
     haversine_miles,
     simplify,
+    simplify_indices,
 )
 
 
@@ -36,13 +37,6 @@ def test_polyline_roundtrip_and_known_vector():
 def test_decode_truncated_polyline_raises():
     with pytest.raises(ValueError):
         decode_polyline("_p~iF~ps|")
-
-
-def test_decimate_keeps_endpoints_and_spacing():
-    pts = [(40 + i * 0.001, -100.0) for i in range(2000)]  # ~0.069 mi apart
-    out = decimate(pts, 0.5)
-    assert out[0] == pts[0] and out[-1] == pts[-1]
-    assert len(out) < len(pts) / 5
 
 
 def test_simplify_bounds_error_and_keeps_endpoints():
@@ -166,3 +160,72 @@ def test_real_ors_geometry_decodes():
     data = json.loads(Path(__file__).with_name("fixtures").joinpath("ors_sample.json").read_text())
     pts = decode_polyline(data["routes"][0]["geometry"])
     assert pts[0] == pytest.approx((40.71, -74.0), abs=0.05)
+
+
+# --- geometry simplification keeps error bounded and mile markers on the full path ---------------
+
+FIXTURE = Path(__file__).with_name("fixtures") / "ors_sample.json"
+
+
+def _full_route():
+    return decode_polyline(json.loads(FIXTURE.read_text())["routes"][0]["geometry"])
+
+
+def test_simplify_indices_keep_endpoints_and_are_sorted():
+    full = _full_route()
+    keep = simplify_indices(full, 0.02)
+    assert keep[0] == 0 and keep[-1] == len(full) - 1 and keep == sorted(set(keep))
+    assert len(keep) < len(full) / 4
+
+
+def test_simplified_geometry_stays_within_tolerance_of_full_route():
+    from planner.geo import _point_segment
+
+    full = _full_route()
+    keep = simplify_indices(full, 0.02)
+    simple = [full[i] for i in keep]
+    rng = random.Random(2)
+    for _ in range(400):  # dropped vertices must lie within tolerance of the kept polyline
+        i = rng.randrange(len(full))
+        j = max(k for k in range(len(keep)) if keep[k] <= i)
+        j = min(j, len(simple) - 2)
+        assert _point_segment(full[i], simple[j], simple[j + 1])[0] <= 0.02 + 1e-6
+
+
+def test_mile_markers_follow_full_path_not_simplified_length():
+    """Locating against the simplified route must agree with the full-resolution route.
+
+    Off-route DISTANCE is bounded by the simplification tolerance for any station. Mile markers
+    for stations near the road track the full path (the naive alternative, scaling the shorter
+    simplified length, drifts by miles). For stations several miles off a bend the foot of the
+    perpendicular is inherently ambiguous between near-equidistant stretches, so that case is
+    only asserted through the distance bound (see README "Route geometry").
+    """
+    full = _full_route()
+    keep = simplify_indices(full, 0.02)
+    cum = cumulative_miles(full)
+    provider_miles = 2794.215
+    full_ix = RouteIndex(full, 10, provider_miles)
+    fast_ix = RouteIndex([full[i] for i in keep], 10, provider_miles, [cum[i] for i in keep])
+    naive_ix = RouteIndex([full[i] for i in keep], 10, provider_miles)  # old behaviour
+    rng = random.Random(4)
+    worst_off = worst_near = worst_near_naive = 0.0
+    for jitter in (0.005, 0.1):  # ~0.35 mi and ~7 mi from the road
+        for _ in range(800):
+            lat, lng = full[rng.randrange(len(full))]
+            p = (lat + rng.uniform(-jitter, jitter), lng + rng.uniform(-jitter, jitter))
+            ref, fast, naive = full_ix.locate(*p), fast_ix.locate(*p), naive_ix.locate(*p)
+            assert (ref is None) == (fast is None)
+            if ref:
+                worst_off = max(worst_off, abs(ref[1] - fast[1]))
+                if jitter == 0.005:
+                    worst_near = max(worst_near, abs(ref[0] - fast[0]))
+                    worst_near_naive = max(worst_near_naive, abs(ref[0] - naive[0]))
+    assert worst_off < 0.05
+    assert worst_near < 0.15
+    assert worst_near_naive > 3 * worst_near
+
+
+def test_route_index_rejects_mismatched_cum():
+    with pytest.raises(ValueError):
+        RouteIndex([(40, -100), (40, -99)], 10, None, [0.0])

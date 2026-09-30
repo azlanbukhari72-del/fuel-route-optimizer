@@ -30,7 +30,9 @@ def select_candidates(route: Route, corridor_miles: float) -> Selection:
         longitude__range=(min(lngs) - dlng, max(lngs) + dlng),
     ).values_list("id", "latitude", "longitude", "price")
 
-    index = RouteIndex(route.points, corridor_miles, total_miles=route.distance_miles)
+    index = RouteIndex(
+        route.points, corridor_miles, route.distance_miles, cum_miles=route.cum_miles
+    )
     candidates: list[Candidate] = []
     off: dict[int, float] = {}
     considered = 0

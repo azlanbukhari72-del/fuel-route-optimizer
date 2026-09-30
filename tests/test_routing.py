@@ -38,7 +38,9 @@ def test_success_converts_to_internal_route_and_sends_lng_lat():
     assert route.distance_miles == pytest.approx(2794.215)
     assert route.duration_minutes == pytest.approx(161823.4 / 60)  # provider seconds -> minutes
     assert route.points[0] == pytest.approx((40.7, -74.0), abs=0.05)  # internal = (lat, lng)
-    assert len(route.points) < 8000  # decimated from ~tens of thousands
+    assert 1000 < len(route.points) < 8000  # simplified from ~21k provider vertices
+    assert len(route.cum_miles) == len(route.points) and route.cum_miles[0] == 0
+    assert route.cum_miles == sorted(route.cum_miles)
     sent = json.loads(responses.calls[0].request.body)
     assert sent["coordinates"] == [
         [-74.0060, 40.7128],
@@ -175,3 +177,68 @@ def test_api_key_never_logged(caplog):
     with pytest.raises(RoutingProviderError):
         routing.get_route(NYC, LA)
     assert "secret-test-key" not in caplog.text
+
+
+# --- cached payload validation ---------------------------------------------------------------
+
+
+def _good_payload():
+    from django.core.cache import cache
+
+    with responses.RequestsMock() as rsps:
+        rsps.add(ok())
+        routing.get_route(NYC, LA)
+    return cache.get(routing._cache_key(NYC, LA))
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda p: "not a dict",
+        lambda p: 12345,
+        lambda p: {},
+        lambda p: {k: v for k, v in p.items() if k != "p"},
+        lambda p: {**p, "p": "\x00\x01garbage-not-a-polyline"},
+        lambda p: {**p, "p": ""},
+        lambda p: {**p, "d": "nan"},
+        lambda p: {**p, "d": -5},
+        lambda p: {**p, "c": p["c"][:-1]},  # length mismatch
+        lambda p: {**p, "c": list(reversed(p["c"]))},  # not monotonic
+        lambda p: {**p, "c": None},
+        lambda p: {**p, "m": None},
+    ],
+)
+@responses.activate
+def test_corrupt_cache_entry_is_a_miss_and_is_replaced(mutate, caplog):
+    from django.core.cache import cache
+
+    good = _good_payload()
+    key = routing._cache_key(NYC, LA)
+    cache.set(key, mutate(good), 60)
+    responses.add(ok())
+    caplog.set_level(logging.WARNING)
+    route, cached = routing.get_route(NYC, LA)
+    assert cached is False and route.distance_miles == pytest.approx(2794.215)
+    assert len(responses.calls) == 1  # recovered by asking the provider
+    assert "route cache entry invalid" in caplog.text
+    assert "secret-test-key" not in caplog.text
+    _, cached_again = routing.get_route(NYC, LA)  # the bad entry was overwritten
+    assert cached_again is True and len(responses.calls) == 1
+
+
+@responses.activate
+def test_valid_cached_entry_round_trips_cum_miles():
+    responses.add(ok())
+    first, _ = routing.get_route(NYC, LA)
+    second, cached = routing.get_route(NYC, LA)
+    assert cached and len(second.points) == len(first.points)
+    assert second.cum_miles == pytest.approx(first.cum_miles, abs=1e-3)
+
+
+@responses.activate
+def test_fresh_route_is_identical_to_cached_route():
+    responses.add(ok())
+    fresh, cached1 = routing.get_route(NYC, LA)
+    hit, cached2 = routing.get_route(NYC, LA)
+    assert (cached1, cached2) == (False, True)
+    assert fresh == hit  # same points, same mileage, same distance: plans cannot differ

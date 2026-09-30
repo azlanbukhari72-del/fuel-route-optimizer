@@ -59,27 +59,25 @@ def encode_polyline(points: list[tuple[float, float]], precision: int = 5) -> st
     return "".join(out)
 
 
-def decimate(
-    points: list[tuple[float, float]], min_spacing_miles: float
-) -> list[tuple[float, float]]:
-    """O(n) thinning: keep a vertex only when it is >= min_spacing from the last kept one."""
-    if len(points) <= 2:
-        return list(points)
-    kept = [points[0]]
-    for p in points[1:-1]:
-        if haversine_miles(kept[-1], p) >= min_spacing_miles:
-            kept.append(p)
-    kept.append(points[-1])
-    return kept
+def cumulative_miles(points: list[tuple[float, float]]) -> list[float]:
+    cum = [0.0]
+    for a, b in zip(points, points[1:], strict=False):
+        cum.append(cum[-1] + haversine_miles(a, b))
+    return cum
 
 
 def simplify(
     points: list[tuple[float, float]], tolerance_miles: float
 ) -> list[tuple[float, float]]:
-    """Iterative Ramer-Douglas-Peucker. Keeps endpoints; max deviation <= tolerance."""
+    """Ramer-Douglas-Peucker. Keeps endpoints; no dropped vertex is > tolerance from the result."""
+    return [points[i] for i in simplify_indices(points, tolerance_miles)]
+
+
+def simplify_indices(points: list[tuple[float, float]], tolerance_miles: float) -> list[int]:
+    """Indices kept by an iterative Ramer-Douglas-Peucker pass (bounded geometric error)."""
     n = len(points)
     if n <= 2:
-        return list(points)
+        return list(range(n))
     keep = [False] * n
     keep[0] = keep[-1] = True
     stack = [(0, n - 1)]
@@ -95,7 +93,7 @@ def simplify(
             keep[far] = True
             stack.append((lo, far))
             stack.append((far, hi))
-    return [p for p, k in zip(points, keep, strict=True) if k]
+    return [i for i, k in enumerate(keep) if k]
 
 
 def _point_segment(p, a, b) -> tuple[float, float]:
@@ -130,14 +128,18 @@ class RouteIndex:
         points: list[tuple[float, float]],
         corridor_miles: float,
         total_miles: float | None = None,
+        cum_miles: list[float] | None = None,
     ):
+        """``cum_miles``: mileage along the ORIGINAL full-resolution path at each point. Pass it
+        when ``points`` is a simplified copy so mile markers keep the full path's length instead
+        of the (shorter) simplified chord length."""
         if len(points) < 2:
             raise ValueError("route needs at least two points")
+        if cum_miles is not None and len(cum_miles) != len(points):
+            raise ValueError("cum_miles must have one entry per point")
         self.points = points
         self.corridor = corridor_miles
-        self.cum = [0.0]
-        for a, b in zip(points, points[1:], strict=False):
-            self.cum.append(self.cum[-1] + haversine_miles(a, b))
+        self.cum = list(cum_miles) if cum_miles is not None else cumulative_miles(points)
         geometric = self.cum[-1]
         # Provider distance is authoritative; stretch our path length to match it.
         self.scale = (total_miles / geometric) if total_miles and geometric > 0 else 1.0

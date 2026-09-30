@@ -192,3 +192,107 @@ def test_designator_stripping_and_consolidated_aliases():
     assert alias_names("Lexington-Fayette urban county") == ["Lexington"]
     assert alias_names("Louisville/Jefferson County metro government (balance)") == ["Louisville"]
     assert alias_names("Tulsa city") == []
+
+
+# --- destructive-import safeguards ---------------------------------------------------------------
+
+
+def _seed_stations(n=10):
+    FuelStation.objects.bulk_create(
+        [
+            FuelStation(
+                opis_id=i + 1,
+                name="n",
+                address="a",
+                city="c",
+                state="AZ",
+                rack_id=1,
+                price=D("3"),
+                updated_at="2026-01-01T00:00:00Z",
+            )
+            for i in range(n)
+        ]
+    )
+
+
+def test_header_only_file_is_refused_and_deletes_nothing(tmp_path, places):
+    from planner.importer import ImportRefused
+
+    _seed_stations()
+    with pytest.raises(ImportRefused, match="no usable"):
+        import_stations(write(tmp_path, ""))
+    assert FuelStation.objects.count() == 10
+
+
+def test_file_with_only_invalid_or_canadian_rows_is_refused(tmp_path, places):
+    from planner.importer import ImportRefused
+
+    _seed_stations()
+    body = "31,MAPLE,Hwy,Toronto,ON,1,3.5\n32,BAD,Hwy,Gila Bend,AZ,1,abc\n"
+    with pytest.raises(ImportRefused):
+        import_stations(write(tmp_path, body))
+    assert FuelStation.objects.count() == 10
+
+
+def test_far_smaller_snapshot_refused_unless_forced(tmp_path, places):
+    from planner.importer import ImportRefused
+
+    _seed_stations(10)
+    one = write(tmp_path, "20,PILOT,I-8,Gila Bend,AZ,930,3.899\n")
+    with pytest.raises(ImportRefused, match="would replace 10"):
+        import_stations(one)
+    assert FuelStation.objects.count() == 10  # untouched
+    stats = import_stations(one, force=True)
+    assert stats.deleted == 10 and FuelStation.objects.count() == 1
+
+
+def test_min_rows_threshold(tmp_path, places):
+    from planner.importer import ImportRefused
+
+    with pytest.raises(ImportRefused, match="below the minimum of 5"):
+        import_stations(write(tmp_path, BODY), min_rows=5)  # only 4 usable stations
+    assert FuelStation.objects.count() == 0
+    assert import_stations(write(tmp_path, BODY), min_rows=4).created == 4
+
+
+def test_force_never_allows_an_empty_snapshot(tmp_path, places):
+    from planner.importer import ImportRefused
+
+    _seed_stations()
+    with pytest.raises(ImportRefused):
+        import_stations(write(tmp_path, ""), force=True)
+    assert FuelStation.objects.count() == 10
+
+
+def test_empty_or_tiny_places_file_refused(tmp_path, db):
+    from planner.importer import ImportRefused
+
+    Place.objects.bulk_create(
+        [
+            Place(state="OK", name_key=f"k{i}", name="n", latitude=D("36"), longitude=D("-95"))
+            for i in range(10)
+        ]
+    )
+    f = tmp_path / "p.csv"
+    f.write_text("state,name_key,name,latitude,longitude\n")
+    with pytest.raises(ImportRefused):
+        load_places(f)
+    f.write_text("state,name_key,name,latitude,longitude\nOK,tulsa,Tulsa,36.15,-95.99\n")
+    with pytest.raises(ImportRefused, match="would replace 10"):
+        load_places(f)
+    assert Place.objects.count() == 10
+    f.write_text("nope\n1\n")
+    with pytest.raises(ImportFileError):
+        load_places(f)
+
+
+def test_command_surfaces_refusal_as_command_error(tmp_path, places):
+    from django.core.management import call_command
+    from django.core.management.base import CommandError
+
+    _seed_stations()
+    with pytest.raises(CommandError, match="refusing"):
+        call_command("import_fuel_data", str(write(tmp_path, "")))
+    assert FuelStation.objects.count() == 10
+    with pytest.raises(CommandError, match="below the minimum of 1000"):
+        call_command("import_fuel_data", str(write(tmp_path, BODY)), "--min-rows", "1000")
