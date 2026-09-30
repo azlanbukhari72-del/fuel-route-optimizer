@@ -1,0 +1,43 @@
+services:
+  db:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: fuel_station
+      POSTGRES_USER: fuel
+      POSTGRES_PASSWORD: fuel
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U fuel -d fuel_station"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+
+  web:
+    build: .
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    environment:
+      DEBUG: "False"
+      SECRET_KEY: ${SECRET_KEY:?set SECRET_KEY in your shell or .env}
+      ALLOWED_HOSTS: localhost,127.0.0.1
+      DATABASE_URL: postgres://fuel:fuel@db:5432/fuel_station
+      REDIS_URL: redis://redis:6379/1
+      ORS_API_KEY: ${ORS_API_KEY:-}
+    ports:
+      - "8000:8000"
+    command: sh -c "python manage.py migrate --noinput && gunicorn config.wsgi:application --bind 0.0.0.0:8000 --workers 3 --access-logfile -"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request as u; u.urlopen('http://localhost:8000/api/v1/health/')"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  pgdata:

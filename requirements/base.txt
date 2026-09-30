@@ -7,6 +7,7 @@ gunicorn==26.2.0
 idna==3.20
 psycopg==3.3.6
 psycopg-binary==3.3.6
+redis==8.1.0
 requests==2.34.2
 sqlparse==0.6.0
 tzdata==2026.4

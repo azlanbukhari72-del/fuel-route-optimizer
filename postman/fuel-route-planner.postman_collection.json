@@ -1,0 +1,309 @@
+{
+  "info": {
+    "name": "Fuel Route Planner",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json",
+    "description": "Start the API (python manage.py runserver) then run the collection. base_url defaults to http://localhost:8000."
+  },
+  "variable": [
+    {
+      "key": "base_url",
+      "value": "http://localhost:8000"
+    }
+  ],
+  "item": [
+    {
+      "name": "1. Cross-country (New York -> Los Angeles)",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('200', () => pm.response.to.have.status(200));",
+              "const d = pm.response.json();",
+              "pm.test('multiple stops and money spent', () => { pm.expect(d.fuel.stops.length).to.be.above(3); pm.expect(parseFloat(d.fuel.total_fuel_cost)).to.be.above(0); });",
+              "pm.test('receipt adds up', () => { const s = d.fuel.stops.reduce((a,x)=>a+Math.round(parseFloat(x.cost)*100),0); pm.expect(s).to.equal(Math.round(parseFloat(d.fuel.total_fuel_cost)*100)); });",
+              "pm.test('consumed = start + purchased - remaining', () => { const f=d.fuel; pm.expect(parseFloat(f.start_gallons)+parseFloat(f.gallons_purchased)-parseFloat(f.gallons_remaining_at_destination)).to.be.closeTo(parseFloat(f.gallons_consumed),0.01); });",
+              "pm.test('GeoJSON [lng, lat]', () => pm.expect(d.route.geometry.coordinates[0][0]).to.be.below(0));"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "url": {
+          "raw": "{{base_url}}/api/v1/routes/plan/",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "api",
+            "v1",
+            "routes",
+            "plan",
+            ""
+          ]
+        },
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"start\": \"New York, NY\",\n  \"finish\": \"Los Angeles, CA\"\n}"
+        },
+        "description": "Run twice: second response has meta.route_cached = true (no second routing-provider call)."
+      }
+    },
+    {
+      "name": "2. Short trip (Chicago -> Indianapolis): no stops, $0",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('200', () => pm.response.to.have.status(200));",
+              "const f = pm.response.json().fuel;",
+              "pm.test('starting tank covers it', () => { pm.expect(f.stops).to.have.lengthOf(0); pm.expect(f.total_fuel_cost).to.equal('0.00'); pm.expect(parseFloat(f.gallons_consumed)).to.be.above(0); });"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "url": {
+          "raw": "{{base_url}}/api/v1/routes/plan/",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "api",
+            "v1",
+            "routes",
+            "plan",
+            ""
+          ]
+        },
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"start\": \"Chicago, IL\",\n  \"finish\": \"Indianapolis, IN\"\n}"
+        },
+        "description": ""
+      }
+    },
+    {
+      "name": "3. Coordinates input (Denver -> Dallas)",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('200', () => pm.response.to.have.status(200));"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "url": {
+          "raw": "{{base_url}}/api/v1/routes/plan/",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "api",
+            "v1",
+            "routes",
+            "plan",
+            ""
+          ]
+        },
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"start\": {\n    \"lat\": 39.7392,\n    \"lng\": -104.9903\n  },\n  \"finish\": {\n    \"lat\": 32.7767,\n    \"lng\": -96.797\n  }\n}"
+        },
+        "description": ""
+      }
+    },
+    {
+      "name": "4. Unknown city -> 422",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('422 location_not_found', () => { pm.response.to.have.status(422); pm.expect(pm.response.json().error.code).to.equal('location_not_found'); });"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "url": {
+          "raw": "{{base_url}}/api/v1/routes/plan/",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "api",
+            "v1",
+            "routes",
+            "plan",
+            ""
+          ]
+        },
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"start\": \"Atlantis, ZZ\",\n  \"finish\": \"Chicago, IL\"\n}"
+        },
+        "description": ""
+      }
+    },
+    {
+      "name": "5. Same start and finish -> 400",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('400 validation_error', () => { pm.response.to.have.status(400); pm.expect(pm.response.json().error.code).to.equal('validation_error'); });"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "url": {
+          "raw": "{{base_url}}/api/v1/routes/plan/",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "api",
+            "v1",
+            "routes",
+            "plan",
+            ""
+          ]
+        },
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"start\": \"Chicago, IL\",\n  \"finish\": \"Chicago, IL\"\n}"
+        },
+        "description": ""
+      }
+    },
+    {
+      "name": "6. Missing field -> 400",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('400 with field errors', () => { pm.response.to.have.status(400); pm.expect(pm.response.json().error.details).to.have.property('finish'); });"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "url": {
+          "raw": "{{base_url}}/api/v1/routes/plan/",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "api",
+            "v1",
+            "routes",
+            "plan",
+            ""
+          ]
+        },
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"start\": \"Chicago, IL\"\n}"
+        },
+        "description": ""
+      }
+    },
+    {
+      "name": "7. Outside service area (London) -> 422",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('422 outside service area', () => { pm.response.to.have.status(422); pm.expect(pm.response.json().error.code).to.equal('location_outside_service_area'); });"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "url": {
+          "raw": "{{base_url}}/api/v1/routes/plan/",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "api",
+            "v1",
+            "routes",
+            "plan",
+            ""
+          ]
+        },
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"start\": {\n    \"lat\": 51.5,\n    \"lng\": -0.12\n  },\n  \"finish\": \"Chicago, IL\"\n}"
+        },
+        "description": ""
+      }
+    }
+  ]
+}
